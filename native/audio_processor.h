@@ -12,7 +12,9 @@
 namespace violin {
 
 constexpr std::size_t kSampleRate = 44100;
-constexpr std::size_t kFrameSize  = 4096;
+// Frame size of 2048 gives ~46.4ms analysis window, hop size of 512 gives ~11.6ms update rate (~86Hz)
+constexpr std::size_t kFrameSize  = 2048;
+constexpr std::size_t kHopSize    = 512;
 
 /**
  * Fixed-size ABI structure.
@@ -37,10 +39,6 @@ static_assert(sizeof(PitchResult) == 12,
 
 /**
  * Callback is intentionally void for Dart NativeCallable.listener.
- *
- * NativeCallable.listener cannot return a value because the native caller
- * does not wait for the Dart callback. The complete PitchResult is passed
- * by value and marshalled to the target isolate.
  */
 using PitchCallback = void (*)(PitchResult result);
 
@@ -56,10 +54,15 @@ public:
     void stop() noexcept;
 
     /**
+     * Start/stop native platform microphone capture directly into the ring buffer.
+     */
+    bool startMic() noexcept;
+    void stopMic() noexcept;
+    bool isMicActive() const noexcept;
+
+    /**
      * Realtime-safe audio producer entry point.
-     *
-     * IMPORTANT:
-     *   Exactly one producer thread may call this method.
+     * Exactly one producer thread may call this method.
      */
     std::size_t pushSamples(
         const float* samples,
@@ -78,13 +81,6 @@ public:
         const std::array<float, kFrameSize>& frame,
         float fundamental_hz) const noexcept;
 
-    /**
-     * Dynamic vibrato-aware note tolerance in cents.
-     *
-     * tolerance = base + local_variance * stretch
-     *
-     * local_variance is expressed in squared cents.
-     */
     float calculateDynamicTolerance(
         float base_cents,
         float local_variance,
@@ -106,16 +102,19 @@ private:
     SpscRingBuffer<float, 32768> input_buffer_;
 
     std::atomic<bool> running_{false};
+    std::atomic<bool> mic_active_{false};
 
     std::thread worker_thread_;
 
     std::atomic<PitchCallback> callback_{nullptr};
 
     // Last accepted pitch values for local vibrato variance.
-    // Fixed-size, therefore no heap allocation.
     std::array<float, 32> pitch_history_{};
     std::size_t pitch_history_size_{0};
     std::size_t pitch_history_write_{0};
+
+    // Pointer to platform-specific mic state (e.g. AudioQueue on Apple)
+    void* platform_mic_handle_{nullptr};
 };
 
 } // namespace violin

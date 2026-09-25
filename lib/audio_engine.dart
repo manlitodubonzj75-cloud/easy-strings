@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:ffi';
+import 'dart:io' show File, Platform, Directory;
 import 'dart:isolate';
-import 'dart:io' show Platform;
 
 /// -------------------------------------------------------------------------
 /// Native ABI
@@ -21,13 +21,7 @@ final class PitchResultNative extends Struct {
   external Array<Uint8> reserved;
 }
 
-/// C++:
-/// using PitchCallback = void (*)(PitchResult result);
 typedef _PitchCallbackNative = Void Function(
-  PitchResultNative result,
-);
-
-typedef _PitchCallbackDart = void Function(
   PitchResultNative result,
 );
 
@@ -48,7 +42,6 @@ typedef _PushSamplesNative = Size Function(
   Pointer<Float> samples,
   Size count,
 );
-
 typedef _PushSamplesDart = int Function(
   Pointer<Void> handle,
   Pointer<Float> samples,
@@ -59,10 +52,29 @@ typedef _SetCallbackNative = Void Function(
   Pointer<Void> handle,
   Pointer<NativeFunction<_PitchCallbackNative>> callback,
 );
-
 typedef _SetCallbackDart = void Function(
   Pointer<Void> handle,
   Pointer<NativeFunction<_PitchCallbackNative>> callback,
+);
+
+typedef _StartMicNative = Int32 Function(Pointer<Void> handle);
+typedef _StartMicDart = int Function(Pointer<Void> handle);
+
+typedef _StopMicNative = Void Function(Pointer<Void> handle);
+typedef _StopMicDart = void Function(Pointer<Void> handle);
+
+typedef _IsMicActiveNative = Int32 Function(Pointer<Void> handle);
+typedef _IsMicActiveDart = int Function(Pointer<Void> handle);
+
+typedef _PushSynthNoteNative = Void Function(
+  Pointer<Void> handle,
+  Float frequencyHz,
+  Float durationSec,
+);
+typedef _PushSynthNoteDart = void Function(
+  Pointer<Void> handle,
+  double frequencyHz,
+  double durationSec,
 );
 
 /// -------------------------------------------------------------------------
@@ -83,8 +95,8 @@ class PitchResult {
   @override
   String toString() {
     return 'PitchResult('
-        'frequencyHz=$frequencyHz, '
-        'confidence=$confidence, '
+        'frequencyHz=${frequencyHz.toStringAsFixed(1)}, '
+        'confidence=${(confidence * 100).toStringAsFixed(0)}%, '
         'isScratching=$isScratching'
         ')';
   }
@@ -94,42 +106,52 @@ class PitchResult {
 /// Worker isolate protocol
 /// -------------------------------------------------------------------------
 
-sealed class _WorkerCommand {}
-
-final class _StartCommand extends _WorkerCommand {
-  final SendPort replyPort;
-
-  _StartCommand(this.replyPort);
+final class _WorkerStartPayload {
+  final SendPort resultPort;
+  _WorkerStartPayload(this.resultPort);
 }
 
-final class _StopCommand extends _WorkerCommand {
+final class _WorkerInitializePayload {
   final SendPort replyPort;
+  _WorkerInitializePayload(this.replyPort);
+}
 
-  _StopCommand(this.replyPort);
+final class _WorkerStopPayload {
+  final SendPort replyPort;
+  _WorkerStopPayload(this.replyPort);
 }
 
 /// -------------------------------------------------------------------------
-/// Public engine
+/// Public Audio Engine
 /// -------------------------------------------------------------------------
 
 class AudioEngine {
   Isolate? _workerIsolate;
-
   SendPort? _workerCommandPort;
-
   ReceivePort? _resultReceivePort;
 
   Pointer<Void>? _nativeHandle;
-
   DynamicLibrary? _mainLibrary;
 
-  _CreateDart? _create;
-  _StartDart? _start;
-  _StopDart? _stop;
-  _DestroyDart? _destroy;
-  _PushSamplesDart? _pushSamples;
+  DynamicLibrary? get mainLibrary => _mainLibrary;
 
+  _StartMicDart? _startMic;
+  _StopMicDart? _stopMic;
+  _IsMicActiveDart? _isMicActive;
+  _PushSamplesDart? _pushSamples;
+  _PushSynthNoteDart? _pushSynthNote;
+
+  StreamController<PitchResult>? _controller;
   Stream<PitchResult>? _results;
+
+  bool get isRunning => _workerIsolate != null;
+
+  bool get isMicActive {
+    final handle = _nativeHandle;
+    final fn = _isMicActive;
+    if (handle == null || fn == null) return false;
+    return fn(handle) != 0;
+  }
 
   /// Start the C++ worker and Dart callback isolate.
   Future<Stream<PitchResult>> start() async {
@@ -138,6 +160,7 @@ class AudioEngine {
     }
 
     final resultPort = ReceivePort();
+    _resultReceivePort = resultPort;
 
     final initPort = ReceivePort();
 
@@ -149,15 +172,12 @@ class AudioEngine {
 
     _workerIsolate = isolate;
 
-    final SendPort workerCommandPort =
-        await initPort.first as SendPort;
-
+    final SendPort workerCommandPort = await initPort.first as SendPort;
+    initPort.close();
     _workerCommandPort = workerCommandPort;
 
-    // Create a response stream.
-    final controller =
-        StreamController<PitchResult>.broadcast();
-
+    final controller = StreamController<PitchResult>.broadcast();
+    _controller = controller;
     _results = controller.stream;
 
     resultPort.listen((dynamic message) {
@@ -166,44 +186,28 @@ class AudioEngine {
       }
     });
 
-    // Tell worker isolate which port should receive results.
     workerCommandPort.send(
-      _WorkerStartPayload(
-        resultPort.sendPort,
-      ),
+      _WorkerStartPayload(resultPort.sendPort),
     );
 
-    final startResponse =
-        ReceivePort();
-
+    final startResponse = ReceivePort();
     workerCommandPort.send(
-      _WorkerInitializePayload(
-        startResponse.sendPort,
-      ),
+      _WorkerInitializePayload(startResponse.sendPort),
     );
 
-    final reply =
-        await startResponse.first;
-
+    final reply = await startResponse.first;
     startResponse.close();
 
-    if (reply is int) {
-      _nativeHandle =
-          Pointer<Void>.fromAddress(reply);
+    if (reply is int && reply != 0) {
+      _nativeHandle = Pointer<Void>.fromAddress(reply);
     } else {
       resultPort.close();
       await controller.close();
-
-      isolate.kill(
-        priority: Isolate.immediate,
-      );
+      isolate.kill(priority: Isolate.immediate);
 
       _workerIsolate = null;
       _workerCommandPort = null;
-
-      throw StateError(
-        'Failed to initialize native violin processor',
-      );
+      throw StateError('Failed to initialize native violin processor');
     }
 
     _openMainLibrary();
@@ -211,167 +215,134 @@ class AudioEngine {
     return _results!;
   }
 
-  /// The native audio callback should call this method with its
-  /// already-owned native PCM buffer.
-  ///
-  /// IMPORTANT:
-  ///   - Do not allocate a Dart Float32List here.
-  ///   - Do not copy PCM into Dart.
-  ///   - The pointer must remain valid while this FFI call executes.
-  ///
-  /// The recommended production integration is to expose the native
-  /// microphone buffer directly from the iOS/Android audio layer.
+  bool startMic() {
+    final handle = _nativeHandle;
+    final fn = _startMic;
+    if (handle == null || fn == null) {
+      return false;
+    }
+    return fn(handle) != 0;
+  }
+
+  void stopMic() {
+    final handle = _nativeHandle;
+    final fn = _stopMic;
+    if (handle == null || fn == null) return;
+    fn(handle);
+  }
+
+  void pushSynthNote(double frequencyHz, [double durationSec = 1.0]) {
+    final handle = _nativeHandle;
+    final fn = _pushSynthNote;
+    if (handle == null || fn == null) return;
+    fn(handle, frequencyHz, durationSec);
+  }
+
   int pushSamples(
     Pointer<Float> samples,
     int count,
   ) {
     final handle = _nativeHandle;
-
-    if (handle == null) {
-      return 0;
-    }
-
     final push = _pushSamples;
-
-    if (push == null) {
-      throw StateError(
-        'Native audio processor is not initialized',
-      );
-    }
-
-    return push(
-      handle,
-      samples,
-      count,
-    );
+    if (handle == null || push == null) return 0;
+    return push(handle, samples, count);
   }
 
   Stream<PitchResult> get results {
     final stream = _results;
-
     if (stream == null) {
-      throw StateError(
-        'AudioEngine has not been started',
-      );
+      throw StateError('AudioEngine has not been started');
     }
-
     return stream;
   }
 
   Future<void> stop() async {
     final commandPort = _workerCommandPort;
+    if (commandPort == null) return;
 
-    if (commandPort == null) {
-      return;
-    }
+    stopMic();
 
     final responsePort = ReceivePort();
-
-    commandPort.send(
-      _WorkerStopPayload(
-        responsePort.sendPort,
-      ),
-    );
-
+    commandPort.send(_WorkerStopPayload(responsePort.sendPort));
     await responsePort.first;
-
     responsePort.close();
 
-    _workerIsolate?.kill(
-      priority: Isolate.immediate,
-    );
-
+    _workerIsolate?.kill(priority: Isolate.immediate);
     _workerIsolate = null;
     _workerCommandPort = null;
     _nativeHandle = null;
 
     _mainLibrary = null;
-
-    _create = null;
-    _start = null;
-    _stop = null;
-    _destroy = null;
+    _startMic = null;
+    _stopMic = null;
+    _isMicActive = null;
     _pushSamples = null;
+    _pushSynthNote = null;
 
-    await Future<void>.value();
+    _resultReceivePort?.close();
+    _resultReceivePort = null;
+    await _controller?.close();
+    _controller = null;
+    _results = null;
   }
 
   void dispose() {
-    _resultReceivePort?.close();
-    _resultReceivePort = null;
+    stop();
   }
 
   void _openMainLibrary() {
     final library = _openLibrary();
-
     _mainLibrary = library;
 
-    _create = library
-        .lookupFunction<_CreateNative, _CreateDart>(
-          'violin_processor_create',
-        );
-
-    _start = library
-        .lookupFunction<_StartNative, _StartDart>(
-          'violin_processor_start',
-        );
-
-    _stop = library
-        .lookupFunction<_StopNative, _StopDart>(
-          'violin_processor_stop',
-        );
-
-    _destroy = library
-        .lookupFunction<_DestroyNative, _DestroyDart>(
-          'violin_processor_destroy',
-        );
-
-    _pushSamples = library
-        .lookupFunction<
-            _PushSamplesNative,
-            _PushSamplesDart>(
-          'violin_processor_push_samples',
-        );
+    _startMic = library.lookupFunction<_StartMicNative, _StartMicDart>(
+      'violin_processor_start_mic',
+    );
+    _stopMic = library.lookupFunction<_StopMicNative, _StopMicDart>(
+      'violin_processor_stop_mic',
+    );
+    _isMicActive = library.lookupFunction<_IsMicActiveNative, _IsMicActiveDart>(
+      'violin_processor_is_mic_active',
+    );
+    _pushSamples = library.lookupFunction<_PushSamplesNative, _PushSamplesDart>(
+      'violin_processor_push_samples',
+    );
+    _pushSynthNote = library.lookupFunction<_PushSynthNoteNative, _PushSynthNoteDart>(
+      'violin_processor_push_synth_note',
+    );
   }
 
   static DynamicLibrary _openLibrary() {
     if (Platform.isIOS) {
-      // For iOS the native symbols are typically linked into the app.
       return DynamicLibrary.process();
     }
 
     if (Platform.isAndroid) {
-      return DynamicLibrary.open(
-        'libviolin_engine.so',
-      );
+      return DynamicLibrary.open('libviolin_engine.so');
     }
 
-    throw UnsupportedError(
-      'Unsupported platform',
-    );
+    if (Platform.isMacOS) {
+      final exeDir = File(Platform.resolvedExecutable).parent.path;
+      final candidates = [
+        '$exeDir/../Frameworks/libviolin_engine.dylib',
+        '$exeDir/libviolin_engine.dylib',
+        'libviolin_engine.dylib',
+        '${Directory.current.path}/libviolin_engine.dylib',
+        '/Users/user/Documents/творчество/easy-violin/libviolin_engine.dylib',
+      ];
+
+      for (final candidate in candidates) {
+        if (File(candidate).existsSync()) {
+          try {
+            return DynamicLibrary.open(candidate);
+          } catch (_) {}
+        }
+      }
+
+      return DynamicLibrary.open('libviolin_engine.dylib');
+    }
+
+    throw UnsupportedError('Unsupported platform: ${Platform.operatingSystem}');
   }
-}
-
-/// -------------------------------------------------------------------------
-/// Worker-isolate messages
-/// -------------------------------------------------------------------------
-
-final class _WorkerStartPayload {
-  final SendPort resultPort;
-
-  _WorkerStartPayload(this.resultPort);
-}
-
-final class _WorkerInitializePayload {
-  final SendPort replyPort;
-
-  _WorkerInitializePayload(this.replyPort);
-}
-
-final class _WorkerStopPayload {
-  final SendPort replyPort;
-
-  _WorkerStopPayload(this.replyPort);
 }
 
 /// -------------------------------------------------------------------------
@@ -380,14 +351,12 @@ final class _WorkerStopPayload {
 
 void _workerMain(SendPort parentPort) {
   final commandPort = ReceivePort();
-
   parentPort.send(commandPort.sendPort);
 
   DynamicLibrary? library;
   NativeCallable<_PitchCallbackNative>? callback;
 
   Pointer<Void>? handle;
-
   SendPort? resultPort;
 
   _StartDart? nativeStart;
@@ -405,92 +374,46 @@ void _workerMain(SendPort parentPort) {
 
     if (message is _WorkerInitializePayload) {
       try {
-        library = _openWorkerLibrary();
+        library = AudioEngine._openLibrary();
 
-        final create =
-            library!.lookupFunction<
-                _CreateNative,
-                _CreateDart>(
-              'violin_processor_create',
-            );
+        final create = library!.lookupFunction<_CreateNative, _CreateDart>(
+          'violin_processor_create',
+        );
 
-        nativeStart =
-            library!.lookupFunction<
-                _StartNative,
-                _StartDart>(
-              'violin_processor_start',
-            );
+        nativeStart = library!.lookupFunction<_StartNative, _StartDart>(
+          'violin_processor_start',
+        );
 
-        nativeStop =
-            library!.lookupFunction<
-                _StopNative,
-                _StopDart>(
-              'violin_processor_stop',
-            );
+        nativeStop = library!.lookupFunction<_StopNative, _StopDart>(
+          'violin_processor_stop',
+        );
 
-        nativeDestroy =
-            library!.lookupFunction<
-                _DestroyNative,
-                _DestroyDart>(
-              'violin_processor_destroy',
-            );
+        nativeDestroy = library!.lookupFunction<_DestroyNative, _DestroyDart>(
+          'violin_processor_destroy',
+        );
 
         nativeSetCallback =
-            library!.lookupFunction<
-                _SetCallbackNative,
-                _SetCallbackDart>(
-              'violin_processor_set_callback',
-            );
+            library!.lookupFunction<_SetCallbackNative, _SetCallbackDart>(
+          'violin_processor_set_callback',
+        );
 
         handle = create(44100.0);
 
-        if (handle == null ||
-            handle!.address == 0) {
+        if (handle == null || handle!.address == 0) {
           message.replyPort.send(0);
           return;
         }
 
-        /**
-         * NativeCallable.listener is the correct callback mode here:
-         *
-         * C++ DSP worker
-         *       |
-         *       v
-         * NativeCallable listener trampoline
-         *       |
-         *       v
-         * Dart worker isolate
-         *       |
-         *       v
-         * ReceivePort in UI isolate
-         *
-         * The native worker is not calling an isolate-local Dart function
-         * directly.
-         */
-        callback = NativeCallable<
-            _PitchCallbackNative>.listener(
+        callback = NativeCallable<_PitchCallbackNative>.listener(
           (PitchResultNative nativeResult) {
             final port = resultPort;
+            if (port == null) return;
 
-            if (port == null) {
-              return;
-            }
-
-            /**
-             * This is deliberately the first place where we construct
-             * a Dart object. It is therefore OUTSIDE the native realtime
-             * DSP code.
-             *
-             * The native worker has already completed its calculation.
-             */
             port.send(
               PitchResult(
-                frequencyHz:
-                    nativeResult.frequencyHz,
-                confidence:
-                    nativeResult.confidence,
-                isScratching:
-                    nativeResult.isScratching != 0,
+                frequencyHz: nativeResult.frequencyHz,
+                confidence: nativeResult.confidence,
+                isScratching: nativeResult.isScratching != 0,
               ),
             );
           },
@@ -501,47 +424,19 @@ void _workerMain(SendPort parentPort) {
           callback!.nativeFunction,
         );
 
-        started =
-            nativeStart!(handle!) != 0;
+        started = nativeStart!(handle!) != 0;
 
         if (!started) {
           callback?.close();
           callback = null;
-
           nativeDestroy!(handle!);
-
           handle = null;
-
           message.replyPort.send(0);
           return;
         }
 
-        /**
-         * OLTW INTEGRATION POINT
-         * ----------------------------------------
-         * Do NOT execute OLTW here synchronously from the native callback.
-         *
-         * Preferred pipeline:
-         *
-         * C++:
-         *    PCM -> MPM -> timbre -> PitchResult
-         *
-         * Dart worker isolate:
-         *    PitchResult -> temporal smoothing
-         *                -> OLTW
-         *                -> note alignment
-         *
-         * UI isolate:
-         *    note alignment -> rendering
-         *
-         * This keeps OLTW's potentially expensive dynamic-programming
-         * work outside the hard realtime DSP path.
-         */
-
-        message.replyPort.send(
-          handle!.address,
-        );
-      } catch (_) {
+        message.replyPort.send(handle!.address);
+      } catch (e) {
         message.replyPort.send(0);
       }
 
@@ -555,10 +450,6 @@ void _workerMain(SendPort parentPort) {
           started = false;
         }
 
-        /**
-         * stop() joins the C++ worker thread.
-         * Therefore, after it returns, the callback can safely be closed.
-         */
         callback?.close();
         callback = null;
 
@@ -567,25 +458,8 @@ void _workerMain(SendPort parentPort) {
       }
 
       message.replyPort.send(true);
-
       commandPort.close();
       return;
     }
   });
-}
-
-DynamicLibrary _openWorkerLibrary() {
-  if (Platform.isIOS) {
-    return DynamicLibrary.process();
-  }
-
-  if (Platform.isAndroid) {
-    return DynamicLibrary.open(
-      'libviolin_engine.so',
-    );
-  }
-
-  throw UnsupportedError(
-    'Unsupported platform',
-  );
 }
