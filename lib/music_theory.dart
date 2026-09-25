@@ -2,36 +2,39 @@ import 'dart:math' as math;
 
 /// Represents one of the 4 strings of a violin.
 enum ViolinString {
-  g(name: 'G', openMidi: 55, openHz: 196.00, colorHex: 0xFFEF4444, order: 3), // Red accent
-  d(name: 'D', openMidi: 62, openHz: 293.66, colorHex: 0xFFF59E0B, order: 2), // Amber
-  a(name: 'A', openMidi: 69, openHz: 440.00, colorHex: 0xFF10B981, order: 1), // Emerald
-  e(name: 'E', openMidi: 76, openHz: 659.25, colorHex: 0xFF3B82F6, order: 0); // Blue
+  g(name: 'G', openMidi: 55, standardHz: 196.00, colorHex: 0xFFEF4444, order: 3), // Red
+  d(name: 'D', openMidi: 62, standardHz: 293.66, colorHex: 0xFFF59E0B, order: 2), // Amber
+  a(name: 'A', openMidi: 69, standardHz: 440.00, colorHex: 0xFF10B981, order: 1), // Emerald
+  e(name: 'E', openMidi: 76, standardHz: 659.25, colorHex: 0xFF3B82F6, order: 0); // Blue
 
   final String name;
   final int openMidi;
-  final double openHz;
+  final double standardHz;
   final int colorHex;
   final int order; // 0 for E (rightmost), 3 for G (leftmost)
 
   const ViolinString({
     required this.name,
     required this.openMidi,
-    required this.openHz,
+    required this.standardHz,
     required this.colorHex,
     required this.order,
   });
+
+  /// Target frequency scaled according to concert A4 calibration
+  double openHz(double concertA4Hz) => standardHz * (concertA4Hz / 440.0);
 
   static const List<ViolinString> inOrder = [g, d, a, e];
 }
 
 /// Finger label for violin fingering in 1st position
 enum ViolinFinger {
-  open(0, '0 (Open)'),
-  first(1, '1st Finger'),
-  lowSecond(2, 'Low 2nd'),
-  highSecond(2, 'High 2nd'),
-  third(3, '3rd Finger'),
-  fourth(4, '4th Finger');
+  open(0, '0 (Открытая)'),
+  first(1, '1-й палец'),
+  lowSecond(2, '2-й (низк.)'),
+  highSecond(2, '2-й (выс.)'),
+  third(3, '3-й палец'),
+  fourth(4, '4-й палец');
 
   final int number;
   final String label;
@@ -43,8 +46,7 @@ class ViolinFingering {
   final ViolinFinger finger;
   final String noteName;
   final int midiNote;
-  final double frequencyHz;
-  /// Physical normalized position from the nut down the fingerboard (0.0 to 1.0)
+  final double standardHz;
   final double positionFraction;
 
   const ViolinFingering({
@@ -52,9 +54,17 @@ class ViolinFingering {
     required this.finger,
     required this.noteName,
     required this.midiNote,
-    required this.frequencyHz,
+    required this.standardHz,
     required this.positionFraction,
   });
+
+  double frequencyHz(double concertA4Hz) => standardHz * (concertA4Hz / 440.0);
+}
+
+enum PegAction {
+  tuneUp,   // String is flat -> tighten peg (натянуть)
+  inTune,   // String is in tune
+  tuneDown, // String is sharp -> loosen peg (ослабить)
 }
 
 class DetectedNoteInfo {
@@ -67,6 +77,8 @@ class DetectedNoteInfo {
   final bool isScratching;
   final double confidence;
   final ViolinFingering? bestFingering;
+  final PegAction pegAction;
+  final int chevronCount; // 1 to 3 depending on deviation
 
   const DetectedNoteInfo({
     required this.rawHz,
@@ -77,14 +89,27 @@ class DetectedNoteInfo {
     required this.isInTune,
     required this.isScratching,
     required this.confidence,
+    required this.pegAction,
+    required this.chevronCount,
     this.bestFingering,
   });
 
+  String get pegHint {
+    switch (pegAction) {
+      case PegAction.inTune:
+        return 'В строю! Строй чистый';
+      case PegAction.tuneUp:
+        return '<<< Натянуть колок (низит)';
+      case PegAction.tuneDown:
+        return 'Ослабить колок (высит) >>>';
+    }
+  }
+
   String get tuningStatus {
-    if (cents.abs() <= 5) return 'Perfect';
-    if (cents.abs() <= 12) return 'In Tune';
-    if (cents > 12) return 'Sharp (+${cents.toStringAsFixed(0)}¢)';
-    return 'Flat (${cents.toStringAsFixed(0)}¢)';
+    if (cents.abs() <= 5) return 'Идеально (±${cents.abs().toStringAsFixed(0)}¢)';
+    if (cents.abs() <= 12) return 'В строю (±${cents.abs().toStringAsFixed(0)}¢)';
+    if (cents > 12) return 'Высит (+${cents.toStringAsFixed(0)}¢)';
+    return 'Низит (${cents.toStringAsFixed(0)}¢)';
   }
 }
 
@@ -97,7 +122,7 @@ class MusicTheory {
     'До', 'До#', 'Ре', 'Ре#', 'Ми', 'Фа', 'Фа#', 'Соль', 'Соль#', 'Ля', 'Ля#', 'Си'
   ];
 
-  /// Standard 1st position violin fingerings table
+  /// Standard 1st position violin fingerings
   static final List<ViolinFingering> firstPositionFingerings = _buildFingerings();
 
   static List<ViolinFingering> _buildFingerings() {
@@ -105,9 +130,8 @@ class MusicTheory {
 
     void add(ViolinString string, int semitonesFromOpen, ViolinFinger finger) {
       final midi = string.openMidi + semitonesFromOpen;
-      final hz = midiToHz(midi);
+      final hz = midiToHz(midi, concertA4Hz: 440.0);
       final noteName = midiToNoteName(midi);
-      // Physical fretless fingerboard formula: 1 - 2^(-semitones / 12)
       final position = 1.0 - math.pow(2.0, -semitonesFromOpen / 12.0);
 
       list.add(ViolinFingering(
@@ -115,7 +139,7 @@ class MusicTheory {
         finger: finger,
         noteName: noteName,
         midiNote: midi,
-        frequencyHz: hz,
+        standardHz: hz,
         positionFraction: position,
       ));
     }
@@ -132,49 +156,60 @@ class MusicTheory {
     return list;
   }
 
-  /// Converts frequency in Hz to fractional MIDI note
-  static double hzToMidi(double hz) {
+  static double hzToMidi(double hz, {double concertA4Hz = 440.0}) {
     if (hz <= 0) return 0;
-    return 69.0 + 12.0 * (math.log(hz / 440.0) / math.ln2);
+    return 69.0 + 12.0 * (math.log(hz / concertA4Hz) / math.ln2);
   }
 
-  /// Converts integer MIDI note to exact frequency in Hz
-  static double midiToHz(int midi) {
-    return 440.0 * math.pow(2.0, (midi - 69) / 12.0);
+  static double midiToHz(int midi, {double concertA4Hz = 440.0}) {
+    return concertA4Hz * math.pow(2.0, (midi - 69) / 12.0);
   }
 
-  /// Converts MIDI note to standard scientific pitch notation (e.g. 69 -> "A4")
   static String midiToNoteName(int midi) {
     final noteIndex = midi % 12;
     final octave = (midi ~/ 12) - 1;
     return '${noteNames[noteIndex]}$octave';
   }
 
-  /// Calculates cents difference from targetHz to actualHz
   static double calculateCents(double actualHz, double targetHz) {
     if (actualHz <= 0 || targetHz <= 0) return 0.0;
     return 1200.0 * (math.log(actualHz / targetHz) / math.ln2);
   }
 
-  /// Evaluates an incoming pitch result from the audio engine
+  /// Analyzes an incoming pitch with calibration & peg tuning instructions
   static DetectedNoteInfo? analyzePitch(
     double hz,
     double confidence,
     bool isScratching, {
     ViolinString? targetString,
-    double inTuneToleranceCents = 12.0,
+    double concertA4Hz = 440.0,
+    double inTuneToleranceCents = 10.0,
   }) {
     if (hz < 150.0 || hz > 2500.0 || confidence < 0.40) {
       return null;
     }
 
-    final fractionalMidi = hzToMidi(hz);
+    final fractionalMidi = hzToMidi(hz, concertA4Hz: concertA4Hz);
     final roundedMidi = fractionalMidi.round();
-    final targetHz = midiToHz(roundedMidi);
+    final targetHz = midiToHz(roundedMidi, concertA4Hz: concertA4Hz);
     final cents = calculateCents(hz, targetHz).clamp(-50.0, 50.0);
 
     final noteName = midiToNoteName(roundedMidi);
     final isInTune = cents.abs() <= inTuneToleranceCents;
+
+    // Peg turning guidance
+    PegAction action;
+    int chevrons;
+    if (isInTune) {
+      action = PegAction.inTune;
+      chevrons = 0;
+    } else if (cents < 0) {
+      action = PegAction.tuneUp;
+      chevrons = cents < -30 ? 3 : (cents < -15 ? 2 : 1);
+    } else {
+      action = PegAction.tuneDown;
+      chevrons = cents > 30 ? 3 : (cents > 15 ? 2 : 1);
+    }
 
     // Find closest violin fingering
     ViolinFingering? bestFingering;
@@ -184,12 +219,12 @@ class MusicTheory {
       if (targetString != null && f.string != targetString) {
         continue;
       }
-      final diff = (f.frequencyHz - hz).abs();
+      final fHz = f.frequencyHz(concertA4Hz);
+      final diff = (fHz - hz).abs();
       if (diff < minDiff - 0.05) {
         minDiff = diff;
         bestFingering = f;
       } else if ((diff - minDiff).abs() <= 0.05) {
-        // Tie-breaker for unison notes: prefer open string or lower finger index
         if (f.finger.number < (bestFingering?.finger.number ?? 99)) {
           bestFingering = f;
         }
@@ -206,6 +241,8 @@ class MusicTheory {
       isScratching: isScratching,
       confidence: confidence,
       bestFingering: bestFingering,
+      pegAction: action,
+      chevronCount: chevrons,
     );
   }
 }

@@ -129,7 +129,7 @@ class FingerboardScreen extends StatelessWidget {
                 : nutY + (fingering.positionFraction / 0.35) * boardHeight - 16,
             child: GestureDetector(
               onTap: () {
-                audioEngine.pushSynthNote(fingering.frequencyHz, 0.6);
+                audioEngine.pushSynthNote(fingering.standardHz, 0.6);
               },
               child: Container(
                 width: 44,
@@ -229,7 +229,6 @@ class ViolinFingerboardPainter extends CustomPainter {
     }
 
     // Draw 4 Strings (G, D, A, E)
-    // Left to right: G (order 3), D (order 2), A (order 1), E (order 0)
     final stringSpacing = width / 5.0;
     final stringThicknesses = [3.6, 2.8, 2.0, 1.4]; // G, D, A, E
 

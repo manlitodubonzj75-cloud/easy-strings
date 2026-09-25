@@ -7,6 +7,8 @@ class TunerScreen extends StatefulWidget {
   final DetectedNoteInfo? currentNote;
   final ViolinString? selectedString;
   final ValueChanged<ViolinString?> onStringSelected;
+  final double concertA4Hz;
+  final ValueChanged<double> onConcertPitchChanged;
 
   const TunerScreen({
     super.key,
@@ -14,13 +16,15 @@ class TunerScreen extends StatefulWidget {
     required this.currentNote,
     required this.selectedString,
     required this.onStringSelected,
+    required this.concertA4Hz,
+    required this.onConcertPitchChanged,
   });
 
   @override
   State<TunerScreen> createState() => _TunerScreenState();
 }
 
-class _TunerScreenState extends State<TunerScreen> with SingleTickerProviderStateMixin {
+class _TunerScreenState extends State<TunerScreen> {
   @override
   Widget build(BuildContext context) {
     final note = widget.currentNote;
@@ -34,22 +38,181 @@ class _TunerScreenState extends State<TunerScreen> with SingleTickerProviderStat
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
+          // Concert pitch calibration toolbar (440 vs 442 Hz)
+          _buildCalibrationBar(),
+          const SizedBox(height: 16),
+
           // String Selector Bar
           _buildStringSelector(),
-          const SizedBox(height: 28),
+          const SizedBox(height: 20),
 
-          // Main Tuner Gauge
+          // Directional Peg Guidance (Chevron Indicator)
+          _buildPegGuidanceBanner(note),
+          const SizedBox(height: 16),
+
+          // Main Tuner Gauge with Segmented LEDs
           _buildTunerGauge(cents, isInTune, isListening, note),
-          const SizedBox(height: 24),
+          const SizedBox(height: 20),
 
           // Tone & Bowing Quality Card
           _buildBowingQualityCard(note, isScratching),
-          const SizedBox(height: 20),
+          const SizedBox(height: 16),
 
           // Fingering recommendation card
           if (note?.bestFingering != null) ...[
             _buildFingeringCard(note!.bestFingering!),
-            const SizedBox(height: 20),
+            const SizedBox(height: 16),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCalibrationBar() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1E2230),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white10),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.tune, color: Color(0xFF6366F1), size: 18),
+              const SizedBox(width: 8),
+              Text(
+                'Эталон A4: ${widget.concertA4Hz.toStringAsFixed(0)} Hz',
+                style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.white,
+                ),
+              ),
+            ],
+          ),
+          Row(
+            children: [
+              _buildPitchPresetButton(440.0, '440 Hz (Стандарт)'),
+              const SizedBox(width: 6),
+              _buildPitchPresetButton(442.0, '442 Hz (Оркестр)'),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPitchPresetButton(double hz, String label) {
+    final isSelected = (widget.concertA4Hz - hz).abs() < 0.1;
+    return GestureDetector(
+      onTap: () => widget.onConcertPitchChanged(hz),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color: isSelected ? const Color(0xFF6366F1) : const Color(0xFF282C3D),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: isSelected ? const Color(0xFF818CF8) : Colors.transparent,
+          ),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 11,
+            fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
+            color: isSelected ? Colors.white : Colors.white60,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPegGuidanceBanner(DetectedNoteInfo? note) {
+    if (note == null) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        decoration: BoxDecoration(
+          color: const Color(0xFF141722),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: Colors.white10),
+        ),
+        child: const Center(
+          child: Text(
+            'Сыграйте струну смычком для подсказки',
+            style: TextStyle(fontSize: 12, color: Colors.white38),
+          ),
+        ),
+      );
+    }
+
+    Color bannerColor;
+    String actionTitle;
+    String chevronLeft = '';
+    String chevronRight = '';
+
+    switch (note.pegAction) {
+      case PegAction.inTune:
+        bannerColor = const Color(0xFF10B981);
+        actionTitle = 'СТРУНА В СТРОЮ';
+        break;
+      case PegAction.tuneUp:
+        bannerColor = const Color(0xFF3B82F6);
+        actionTitle = 'НАТЯНУТЬ КОЛОК (ОТ СЕБЯ)';
+        chevronLeft = '<' * note.chevronCount;
+        break;
+      case PegAction.tuneDown:
+        bannerColor = const Color(0xFFF59E0B);
+        actionTitle = 'ОСЛАБИТЬ КОЛОК (НА СЕБЯ)';
+        chevronRight = '>' * note.chevronCount;
+        break;
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+      decoration: BoxDecoration(
+        color: bannerColor.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: bannerColor.withValues(alpha: 0.5), width: 1.5),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          if (chevronLeft.isNotEmpty) ...[
+            Text(
+              chevronLeft,
+              style: TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.w900,
+                color: bannerColor,
+                letterSpacing: 2,
+              ),
+            ),
+            const SizedBox(width: 12),
+          ],
+          Text(
+            actionTitle,
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w900,
+              color: bannerColor,
+              letterSpacing: 0.5,
+            ),
+          ),
+          if (chevronRight.isNotEmpty) ...[
+            const SizedBox(width: 12),
+            Text(
+              chevronRight,
+              style: TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.w900,
+                color: bannerColor,
+                letterSpacing: 2,
+              ),
+            ),
           ],
         ],
       ),
@@ -68,10 +231,10 @@ class _TunerScreenState extends State<TunerScreen> with SingleTickerProviderStat
         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
         children: [
           _buildStringTab(null, 'Auto'),
-          _buildStringTab(ViolinString.g, 'G (196)'),
-          _buildStringTab(ViolinString.d, 'D (294)'),
-          _buildStringTab(ViolinString.a, 'A (440)'),
-          _buildStringTab(ViolinString.e, 'E (659)'),
+          _buildStringTab(ViolinString.g, 'G (${ViolinString.g.openHz(widget.concertA4Hz).toStringAsFixed(0)})'),
+          _buildStringTab(ViolinString.d, 'D (${ViolinString.d.openHz(widget.concertA4Hz).toStringAsFixed(0)})'),
+          _buildStringTab(ViolinString.a, 'A (${ViolinString.a.openHz(widget.concertA4Hz).toStringAsFixed(0)})'),
+          _buildStringTab(ViolinString.e, 'E (${ViolinString.e.openHz(widget.concertA4Hz).toStringAsFixed(0)})'),
         ],
       ),
     );
@@ -83,15 +246,15 @@ class _TunerScreenState extends State<TunerScreen> with SingleTickerProviderStat
       onTap: () => widget.onStringSelected(string),
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
         decoration: BoxDecoration(
           color: isSelected ? const Color(0xFF6366F1) : Colors.transparent,
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(10),
         ),
         child: Text(
           label,
           style: TextStyle(
-            fontSize: 13,
+            fontSize: 12,
             fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
             color: isSelected ? Colors.white : Colors.white70,
           ),
@@ -113,18 +276,18 @@ class _TunerScreenState extends State<TunerScreen> with SingleTickerProviderStat
             : (cents > 0 ? const Color(0xFFF59E0B) : const Color(0xFF3B82F6));
 
     return Container(
-      padding: const EdgeInsets.all(28),
+      padding: const EdgeInsets.all(24),
       decoration: BoxDecoration(
         color: const Color(0xFF181B26),
         borderRadius: BorderRadius.circular(28),
         border: Border.all(
-          color: isInTune ? const Color(0xFF10B981).withValues(alpha: 0.4) : Colors.white10,
+          color: isInTune ? const Color(0xFF10B981).withValues(alpha: 0.5) : Colors.white10,
           width: isInTune ? 2 : 1,
         ),
         boxShadow: [
           if (isInTune)
             BoxShadow(
-              color: const Color(0xFF10B981).withValues(alpha: 0.15),
+              color: const Color(0xFF10B981).withValues(alpha: 0.2),
               blurRadius: 32,
               spreadRadius: 4,
             ),
@@ -136,7 +299,7 @@ class _TunerScreenState extends State<TunerScreen> with SingleTickerProviderStat
           Text(
             note?.noteName ?? '—',
             style: TextStyle(
-              fontSize: 64,
+              fontSize: 60,
               fontWeight: FontWeight.w900,
               letterSpacing: -1,
               color: statusColor,
@@ -150,15 +313,15 @@ class _TunerScreenState extends State<TunerScreen> with SingleTickerProviderStat
                 ? '${note.rawHz.toStringAsFixed(1)} Hz (Цель: ${note.targetHz.toStringAsFixed(1)} Hz)'
                 : 'Ожидание звука скрипки...',
             style: const TextStyle(
-              fontSize: 14,
+              fontSize: 13,
               color: Colors.white54,
               fontFamily: 'monospace',
             ),
           ),
-          const SizedBox(height: 28),
+          const SizedBox(height: 24),
 
-          // Cents Bar Meter
-          _buildCentsMeter(cents, isInTune, statusColor),
+          // Segmented LED VU-Meter (Instrutune inspired)
+          _buildSegmentedLedMeter(cents, isInTune, statusColor),
           const SizedBox(height: 16),
 
           // Status Badge
@@ -182,78 +345,83 @@ class _TunerScreenState extends State<TunerScreen> with SingleTickerProviderStat
     );
   }
 
-  Widget _buildCentsMeter(double cents, bool isInTune, Color statusColor) {
-    // cents is -50 to +50
-    final normalized = ((cents + 50) / 100).clamp(0.0, 1.0);
+  Widget _buildSegmentedLedMeter(double cents, bool isInTune, Color statusColor) {
+    const int numSegmentsPerSide = 12;
 
     return Column(
       children: [
-        LayoutBuilder(
-          builder: (context, constraints) {
-            final width = constraints.maxWidth;
-            final needleX = width * normalized;
-
-            return Stack(
-              clipBehavior: Clip.none,
-              children: [
-                // Track bar
-                Container(
-                  height: 12,
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(6),
-                    gradient: const LinearGradient(
-                      colors: [
-                        Color(0xFF3B82F6), // Blue (flat)
-                        Color(0xFF10B981), // Center green
-                        Color(0xFFF59E0B), // Amber (sharp)
-                      ],
-                    ),
-                  ),
-                ),
-                // Center zero notch
-                Positioned(
-                  left: width / 2 - 1,
-                  top: -4,
-                  bottom: -4,
-                  child: Container(
-                    width: 2,
-                    color: Colors.white,
-                  ),
-                ),
-                // Needle
-                Positioned(
-                  left: (needleX - 8).clamp(0.0, width - 16),
-                  top: -8,
-                  child: Container(
-                    width: 16,
-                    height: 28,
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: statusColor, width: 2),
-                      boxShadow: [
-                        BoxShadow(
-                          color: statusColor.withValues(alpha: 0.5),
-                          blurRadius: 8,
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
-            );
-          },
-        ),
-        const SizedBox(height: 12),
-        const Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Text('-50¢ (Низит)', style: TextStyle(fontSize: 11, color: Colors.white38)),
-            Text('0¢ (В точку)', style: TextStyle(fontSize: 11, color: Color(0xFF10B981), fontWeight: FontWeight.bold)),
-            Text('+50¢ (Высит)', style: TextStyle(fontSize: 11, color: Colors.white38)),
+            // Left segments (Flat / Низит)
+            for (int i = numSegmentsPerSide; i >= 1; i--) ...[
+              _buildLedSegment(
+                isActive: cents < -5 && (-cents >= (i * (45.0 / numSegmentsPerSide))),
+                color: const Color(0xFF3B82F6),
+              ),
+              const SizedBox(width: 2),
+            ],
+
+            // Center Lock LED (In Tune)
+            Container(
+              width: 14,
+              height: 28,
+              decoration: BoxDecoration(
+                color: isInTune ? const Color(0xFF10B981) : Colors.white24,
+                borderRadius: BorderRadius.circular(4),
+                boxShadow: [
+                  if (isInTune)
+                    const BoxShadow(
+                      color: Color(0xFF10B981),
+                      blurRadius: 10,
+                      spreadRadius: 2,
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 2),
+
+            // Right segments (Sharp / Высит)
+            for (int i = 1; i <= numSegmentsPerSide; i++) ...[
+              _buildLedSegment(
+                isActive: cents > 5 && (cents >= (i * (45.0 / numSegmentsPerSide))),
+                color: const Color(0xFFF59E0B),
+              ),
+              if (i < numSegmentsPerSide) const SizedBox(width: 2),
+            ],
           ],
         ),
+        const SizedBox(height: 12),
+        const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 8),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text('-50¢ (Низит)', style: TextStyle(fontSize: 11, color: Color(0xFF3B82F6))),
+              Text('0¢ (В строю)', style: TextStyle(fontSize: 11, color: Color(0xFF10B981), fontWeight: FontWeight.bold)),
+              Text('+50¢ (Высит)', style: TextStyle(fontSize: 11, color: Color(0xFFF59E0B))),
+            ],
+          ),
+        ),
       ],
+    );
+  }
+
+  Widget _buildLedSegment({required bool isActive, required Color color}) {
+    return Container(
+      width: 7,
+      height: 20,
+      decoration: BoxDecoration(
+        color: isActive ? color : const Color(0xFF242838),
+        borderRadius: BorderRadius.circular(2),
+        boxShadow: [
+          if (isActive)
+            BoxShadow(
+              color: color.withValues(alpha: 0.6),
+              blurRadius: 6,
+            ),
+        ],
+      ),
     );
   }
 

@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'audio_engine.dart';
 import 'music_theory.dart';
 import 'ui/fingerboard_screen.dart';
+import 'ui/song_practice_screen.dart';
 import 'ui/synth_test_panel.dart';
 import 'ui/tuner_screen.dart';
 import 'ui/trainer_screen.dart';
@@ -48,6 +49,7 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
 
   int _selectedTabIndex = 0;
   ViolinString? _selectedTunerString;
+  double _concertA4Hz = 440.0;
   bool _isMicActive = false;
   String _statusMessage = 'Инициализация DSP движка...';
 
@@ -66,7 +68,6 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
       final stream = await _audioEngine.start();
       _pitchSub = stream.listen(_onPitchResult);
 
-      // Attempt to auto-start native microphone
       final micStarted = _audioEngine.startMic();
       setState(() {
         _isMicActive = micStarted;
@@ -84,7 +85,6 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
   void _onPitchResult(PitchResult result) {
     final now = DateTime.now();
     if (result.frequencyHz <= 0 || result.confidence < 0.45) {
-      // If no valid pitch for 400ms, clear current note
       if (now.difference(_lastNoteTime).inMilliseconds > 400) {
         if (_currentNote != null) {
           setState(() {
@@ -109,6 +109,7 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
       result.confidence,
       result.isScratching,
       targetString: _selectedTunerString,
+      concertA4Hz: _concertA4Hz,
     );
 
     if (mounted) {
@@ -213,11 +214,21 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
                   audioEngine: _audioEngine,
                   currentNote: _currentNote,
                   selectedString: _selectedTunerString,
+                  concertA4Hz: _concertA4Hz,
+                  onConcertPitchChanged: (pitch) {
+                    setState(() {
+                      _concertA4Hz = pitch;
+                    });
+                  },
                   onStringSelected: (str) {
                     setState(() {
                       _selectedTunerString = str;
                     });
                   },
+                ),
+                SongPracticeScreen(
+                  audioEngine: _audioEngine,
+                  currentNote: _currentNote,
                 ),
                 FingerboardScreen(
                   audioEngine: _audioEngine,
@@ -264,12 +275,16 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
               label: 'Тюнер',
             ),
             BottomNavigationBarItem(
+              icon: Icon(Icons.library_music_rounded),
+              label: 'Пьесы',
+            ),
+            BottomNavigationBarItem(
               icon: Icon(Icons.line_weight_sharp),
               label: 'Гриф',
             ),
             BottomNavigationBarItem(
               icon: Icon(Icons.school_rounded),
-              label: 'Тренажер',
+              label: 'Уроки',
             ),
           ],
         ),
