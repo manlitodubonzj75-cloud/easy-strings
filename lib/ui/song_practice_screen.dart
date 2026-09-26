@@ -5,6 +5,8 @@ import '../audio_engine.dart';
 import '../models/song_model.dart';
 import '../music_theory.dart';
 import '../services/midi_parser.dart';
+import '../services/omr_parser.dart';
+import '../services/midi_generator.dart';
 import '../theme/apple_violin_theme.dart';
 import 'widgets/musical_staff_view.dart';
 
@@ -314,6 +316,92 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
     );
   }
 
+  Future<void> _pickScoreImageAndOmr() async {
+    try {
+      final files = await FilePicker.pickFiles(
+        dialogTitle: 'Выберите фото или скан партитуры для OMR-распознавания',
+        type: FileType.custom,
+        allowedExtensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp'],
+      );
+
+      if (files.isEmpty) return;
+
+      final pickedFile = files.first;
+      final bytes = await pickedFile.readAsBytes();
+      final fileName = pickedFile.name;
+      final title = fileName.replaceAll(RegExp(r'\.[a-zA-Z0-9]+$'), '');
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            backgroundColor: AppleViolinTheme.appleBlue,
+            content: Text('📸 Распознавание нотного стана и нот с фото (OMR)...'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+
+      final result = await SheetMusicOmrParser.parseImageBytes(bytes, title: title);
+
+      setState(() {
+        _availableSongs = [result.song, ..._availableSongs];
+        _currentSong = result.song;
+        _selectedCategory = RepertoireCategory.custom;
+        _resetPractice();
+      });
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            backgroundColor: AppleViolinTheme.appleGreen,
+            content: Text('✓ ${result.report}'),
+            duration: const Duration(seconds: 4),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            backgroundColor: AppleViolinTheme.appleRed,
+            content: Text('Ошибка распознавания фото: $e'),
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _exportCurrentSongMidi() async {
+    try {
+      final midiBytes = MidiGenerator.generateMidiBytes(_currentSong);
+      final savedPath = await FilePicker.saveFile(
+        dialogTitle: 'Экспорт партитуры в стандартный MIDI-файл',
+        fileName: '${_currentSong.title.replaceAll(' ', '_')}.mid',
+        bytes: midiBytes,
+        type: FileType.custom,
+        allowedExtensions: ['mid'],
+      );
+
+      if (savedPath != null && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            backgroundColor: AppleViolinTheme.appleGreen,
+            content: Text('✓ MIDI сохранён: $savedPath'),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            backgroundColor: AppleViolinTheme.appleRed,
+            content: Text('Ошибка сохранения MIDI: $e'),
+          ),
+        );
+      }
+    }
+  }
+
   Future<void> _pickCustomMidi() async {
     try {
       final files = await FilePicker.pickFiles(
@@ -428,27 +516,63 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
                   ),
                 ],
               ),
-              // + MIDI Button opening storage
-              GestureDetector(
-                onTap: _pickCustomMidi,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
-                  decoration: BoxDecoration(
-                    color: AppleViolinTheme.elevatedDark,
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(color: Colors.white12),
-                  ),
-                  child: Row(
-                    children: const [
-                      Icon(Icons.add, size: 16, color: AppleViolinTheme.appleBlue),
-                      SizedBox(width: 4),
-                      Text(
-                        '+ MIDI / XML',
-                        style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: AppleViolinTheme.appleBlue),
+              // Action Buttons: OMR Photo Scanner + MIDI Upload
+              Row(
+                children: [
+                  GestureDetector(
+                    onTap: _pickScoreImageAndOmr,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
+                      decoration: BoxDecoration(
+                        color: AppleViolinTheme.appleBlue.withValues(alpha: 0.18),
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: AppleViolinTheme.appleBlue.withValues(alpha: 0.45)),
                       ),
-                    ],
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: const [
+                          Icon(Icons.document_scanner_rounded, size: 14, color: AppleViolinTheme.appleBlue),
+                          SizedBox(width: 4),
+                          Text(
+                            'Фото нот (OMR)',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                              color: AppleViolinTheme.appleBlue,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                   ),
-                ),
+                  const SizedBox(width: 6),
+                  GestureDetector(
+                    onTap: _pickCustomMidi,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+                      decoration: BoxDecoration(
+                        color: AppleViolinTheme.elevatedDark,
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: Colors.white12),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: const [
+                          Icon(Icons.upload_file_rounded, size: 14, color: Colors.white70),
+                          SizedBox(width: 4),
+                          Text(
+                            '+ MIDI',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                              color: Colors.white,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ],
           ),
@@ -730,6 +854,30 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
         // Mode Toggles: Wait Note vs In-tempo & Accompaniment
         Row(
           children: [
+            // Export to MIDI file button
+            GestureDetector(
+              onTap: _exportCurrentSongMidi,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+                decoration: BoxDecoration(
+                  color: AppleViolinTheme.elevatedDark,
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: Colors.white10),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: const [
+                    Icon(Icons.save_alt_rounded, color: Colors.white70, size: 13),
+                    SizedBox(width: 3),
+                    Text(
+                      'MIDI',
+                      style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Colors.white70),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(width: 5),
             // Demo Playback Button
             GestureDetector(
               onTap: () {
