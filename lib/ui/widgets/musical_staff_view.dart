@@ -1,11 +1,15 @@
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import '../../models/song_model.dart';
 
 class MusicalStaffView extends StatelessWidget {
   final int? targetMidi;
+  final int? nextTargetMidi;
   final int? playedMidi;
   final bool isScratching;
   final bool isInTune;
+  final bool isSlurred;
+  final BowDirection? bowDirection;
   final String? noteLabel;
   final double height;
   final bool compact;
@@ -13,9 +17,12 @@ class MusicalStaffView extends StatelessWidget {
   const MusicalStaffView({
     super.key,
     required this.targetMidi,
+    this.nextTargetMidi,
     this.playedMidi,
     this.isScratching = false,
     this.isInTune = false,
+    this.isSlurred = false,
+    this.bowDirection,
     this.noteLabel,
     this.height = 110,
     this.compact = false,
@@ -35,9 +42,12 @@ class MusicalStaffView extends StatelessWidget {
         size: Size(double.infinity, height),
         painter: TrebleStaffPainter(
           targetMidi: targetMidi,
+          nextTargetMidi: nextTargetMidi,
           playedMidi: playedMidi,
           isScratching: isScratching,
           isInTune: isInTune,
+          isSlurred: isSlurred,
+          bowDirection: bowDirection,
           noteLabel: noteLabel,
           compact: compact,
         ),
@@ -48,23 +58,27 @@ class MusicalStaffView extends StatelessWidget {
 
 class TrebleStaffPainter extends CustomPainter {
   final int? targetMidi;
+  final int? nextTargetMidi;
   final int? playedMidi;
   final bool isScratching;
   final bool isInTune;
+  final bool isSlurred;
+  final BowDirection? bowDirection;
   final String? noteLabel;
   final bool compact;
 
   TrebleStaffPainter({
     required this.targetMidi,
+    required this.nextTargetMidi,
     required this.playedMidi,
     required this.isScratching,
     required this.isInTune,
+    required this.isSlurred,
+    required this.bowDirection,
     required this.noteLabel,
     required this.compact,
   });
 
-  // Diatonic mapping for semitones 0..11 (C to B)
-  // [diatonic step (0=C, 1=D, 2=E, 3=F, 4=G, 5=A, 6=B), isSharp]
   static const List<(int, bool)> _semitoneMap = [
     (0, false), // C
     (0, true),  // C#
@@ -82,7 +96,7 @@ class TrebleStaffPainter extends CustomPainter {
 
   static (int step, bool isSharp) _getDiatonicStep(int midi) {
     final noteInOct = midi % 12;
-    final octave = (midi ~/ 12) - 1; // 60 -> octave 4 (Middle C)
+    final octave = (midi ~/ 12) - 1;
     final (baseStep, isSharp) = _semitoneMap[noteInOct];
     final totalStep = (octave - 4) * 7 + baseStep;
     return (totalStep, isSharp);
@@ -93,11 +107,8 @@ class TrebleStaffPainter extends CustomPainter {
     final width = size.width;
     final height = size.height;
 
-    // Staff geometry
     final lineSpacing = compact ? 8.0 : 10.0;
     final staffCenterY = height * 0.52;
-    // 5 staff lines centered around Line 3 (B4, step 6)
-    // Line 1 is E4 (step 2), Line 5 is F5 (step 10)
     final line3Y = staffCenterY;
     final line1Y = line3Y + lineSpacing * 2.0;
 
@@ -105,7 +116,6 @@ class TrebleStaffPainter extends CustomPainter {
       ..color = Colors.white.withValues(alpha: 0.35)
       ..strokeWidth = 1.2;
 
-    // Draw 5 staff lines
     const startX = 14.0;
     final endX = width - 14.0;
 
@@ -114,56 +124,97 @@ class TrebleStaffPainter extends CustomPainter {
       canvas.drawLine(Offset(startX, y), Offset(endX, y), staffPaint);
     }
 
-    // Draw Treble Clef (Скрипичный ключ)
     _drawTrebleClef(canvas, line3Y, lineSpacing);
 
-    // Draw Target Note
+    double? targetNoteX;
+    double? targetNoteY;
+    double? nextNoteX;
+    double? nextNoteY;
+
     if (targetMidi != null) {
       final (step, isSharp) = _getDiatonicStep(targetMidi!);
-      final noteY = line1Y - ((step - 2) * (lineSpacing / 2.0));
-      final noteX = compact ? width * 0.50 : width * 0.45;
+      targetNoteY = line1Y - ((step - 2) * (lineSpacing / 2.0));
+      targetNoteX = (nextTargetMidi != null && isSlurred)
+          ? (compact ? width * 0.38 : width * 0.36)
+          : (compact ? width * 0.50 : width * 0.45);
 
       _drawNote(
         canvas: canvas,
-        x: noteX,
-        y: noteY,
+        x: targetNoteX,
+        y: targetNoteY,
         step: step,
         isSharp: isSharp,
         lineSpacing: lineSpacing,
         line1Y: line1Y,
         line5Y: line1Y - 4 * lineSpacing,
-        color: const Color(0xFF6366F1), // Indigo target
+        color: const Color(0xFF6366F1),
         alpha: 1.0,
         label: noteLabel,
       );
+
+      // Draw Bow Direction symbol (⊓ Down-bow or ∨ Up-bow)
+      if (bowDirection != null) {
+        _drawBowSymbol(canvas, targetNoteX, line1Y - 4 * lineSpacing - 14, bowDirection!, lineSpacing);
+      }
     }
 
-    // Draw Live Played Note if detected and distinct
+    // Draw Next Slurred Note if in pair
+    if (nextTargetMidi != null && isSlurred && targetNoteX != null && targetNoteY != null) {
+      final (nStep, nIsSharp) = _getDiatonicStep(nextTargetMidi!);
+      nextNoteY = line1Y - ((nStep - 2) * (lineSpacing / 2.0));
+      nextNoteX = targetNoteX + (compact ? 46.0 : 64.0);
+
+      _drawNote(
+        canvas: canvas,
+        x: nextNoteX,
+        y: nextNoteY,
+        step: nStep,
+        isSharp: nIsSharp,
+        lineSpacing: lineSpacing,
+        line1Y: line1Y,
+        line5Y: line1Y - 4 * lineSpacing,
+        color: const Color(0xFF6366F1).withValues(alpha: 0.7),
+        alpha: 0.7,
+        label: null,
+      );
+
+      // Draw Cubic Bezier Slur Arc (Лига)
+      _drawSlurArc(canvas, Offset(targetNoteX, targetNoteY), Offset(nextNoteX, nextNoteY), lineSpacing);
+    } else if (isSlurred && targetNoteX != null && targetNoteY != null) {
+      _drawSlurArc(
+        canvas,
+        Offset(targetNoteX - lineSpacing * 1.5, targetNoteY),
+        Offset(targetNoteX + lineSpacing * 1.5, targetNoteY),
+        lineSpacing,
+      );
+    }
+
+    // Draw Live Played Note
     if (playedMidi != null) {
       final isMatch = playedMidi == targetMidi;
       final (step, isSharp) = _getDiatonicStep(playedMidi!);
       final noteY = line1Y - ((step - 2) * (lineSpacing / 2.0));
       final noteX = targetMidi == null
           ? width * 0.5
-          : (isMatch ? (compact ? width * 0.50 : width * 0.45) : (compact ? width * 0.75 : width * 0.72));
+          : (isMatch
+              ? targetNoteX ?? width * 0.5
+              : (compact ? width * 0.80 : width * 0.76));
 
       Color playedColor;
       if (isScratching) {
-        playedColor = const Color(0xFFEF4444); // Red scratch
+        playedColor = const Color(0xFFEF4444);
       } else if (isMatch) {
         playedColor = isInTune ? const Color(0xFF10B981) : const Color(0xFFF59E0B);
       } else {
-        playedColor = const Color(0xFFF59E0B); // Amber wrong note
+        playedColor = const Color(0xFFF59E0B);
       }
 
       if (isMatch) {
-        // Glowing halo on target note
         final glowPaint = Paint()
           ..color = playedColor.withValues(alpha: 0.4)
           ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 10);
         canvas.drawCircle(Offset(noteX, noteY), lineSpacing * 1.5, glowPaint);
       } else {
-        // Draw separate ghost note for what user is actually playing
         _drawNote(
           canvas: canvas,
           x: noteX,
@@ -181,8 +232,54 @@ class TrebleStaffPainter extends CustomPainter {
     }
   }
 
+  void _drawBowSymbol(Canvas canvas, double x, double y, BowDirection bow, double lineSpacing) {
+    final bowPaint = Paint()
+      ..color = const Color(0xFF818CF8)
+      ..strokeWidth = 1.8
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round;
+
+    if (bow == BowDirection.down) {
+      final w = lineSpacing * 0.9;
+      final h = lineSpacing * 0.6;
+      final path = Path()
+        ..moveTo(x - w / 2, y + h)
+        ..lineTo(x - w / 2, y)
+        ..lineTo(x + w / 2, y)
+        ..lineTo(x + w / 2, y + h);
+      canvas.drawPath(path, bowPaint);
+    } else {
+      final w = lineSpacing * 0.8;
+      final h = lineSpacing * 0.7;
+      final path = Path()
+        ..moveTo(x - w / 2, y)
+        ..lineTo(x, y + h)
+        ..lineTo(x + w / 2, y);
+      canvas.drawPath(path, bowPaint);
+    }
+  }
+
+  void _drawSlurArc(Canvas canvas, Offset p1, Offset p2, double lineSpacing) {
+    final arcPaint = Paint()
+      ..color = const Color(0xFF818CF8).withValues(alpha: 0.85)
+      ..strokeWidth = 2.0
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round;
+
+    final double arcHeight = lineSpacing * 1.8;
+    final double topY = math.min(p1.dy, p2.dy) - arcHeight;
+
+    final path = Path();
+    path.moveTo(p1.dx, p1.dy - lineSpacing * 0.6);
+
+    final cp1 = Offset(p1.dx + (p2.dx - p1.dx) * 0.25, topY);
+    final cp2 = Offset(p1.dx + (p2.dx - p1.dx) * 0.75, topY);
+
+    path.cubicTo(cp1.dx, cp1.dy, cp2.dx, cp2.dy, p2.dx, p2.dy - lineSpacing * 0.6);
+    canvas.drawPath(path, arcPaint);
+  }
+
   void _drawTrebleClef(Canvas canvas, double line3Y, double spacing) {
-    // Stylized artistic Treble Clef
     final clefPaint = Paint()
       ..color = Colors.white.withValues(alpha: 0.75)
       ..strokeWidth = 2.0
@@ -192,18 +289,14 @@ class TrebleStaffPainter extends CustomPainter {
     final cx = 36.0;
     final path = Path();
 
-    // Vertical spine of clef
     path.moveTo(cx, line3Y + spacing * 2.8);
     path.lineTo(cx, line3Y - spacing * 3.0);
-    // Upper loop
     path.quadraticBezierTo(cx + spacing * 1.6, line3Y - spacing * 1.8, cx, line3Y - spacing * 0.6);
-    // G line curl (around line 2, which is line3Y + spacing)
     path.quadraticBezierTo(cx - spacing * 2.0, line3Y + spacing * 0.8, cx, line3Y + spacing * 1.8);
     path.quadraticBezierTo(cx + spacing * 1.8, line3Y + spacing * 1.6, cx, line3Y + spacing * 0.6);
 
     canvas.drawPath(path, clefPaint);
 
-    // Bottom dot
     final dotPaint = Paint()
       ..color = Colors.white.withValues(alpha: 0.75)
       ..style = PaintingStyle.fill;
@@ -223,14 +316,12 @@ class TrebleStaffPainter extends CustomPainter {
     required double alpha,
     String? label,
   }) {
-    // 1. Draw ledger lines if note is below line 1 or above line 5
     final ledgerPaint = Paint()
       ..color = Colors.white.withValues(alpha: 0.5)
       ..strokeWidth = 1.3;
     final ledgerWidth = lineSpacing * 2.4;
 
     if (step <= 0) {
-      // Below staff: step 0 is C4, step -2 is A3, etc.
       for (int s = 0; s >= step; s -= 2) {
         final ly = line1Y - ((s - 2) * (lineSpacing / 2.0));
         canvas.drawLine(
@@ -240,7 +331,6 @@ class TrebleStaffPainter extends CustomPainter {
         );
       }
     } else if (step >= 12) {
-      // Above staff: step 12 is A5, step 14 is C6, etc.
       for (int s = 12; s <= step; s += 2) {
         final ly = line1Y - ((s - 2) * (lineSpacing / 2.0));
         canvas.drawLine(
@@ -251,7 +341,6 @@ class TrebleStaffPainter extends CustomPainter {
       }
     }
 
-    // 2. Draw Sharp '#' accidental if applicable
     if (isSharp) {
       final sharpPaint = Paint()
         ..color = color.withValues(alpha: alpha)
@@ -261,15 +350,12 @@ class TrebleStaffPainter extends CustomPainter {
       final sx = x - lineSpacing * 1.6;
       final sh = lineSpacing * 1.6;
 
-      // Two vertical bars
       canvas.drawLine(Offset(sx - 3, y - sh / 2), Offset(sx - 3, y + sh / 2), sharpPaint);
       canvas.drawLine(Offset(sx + 3, y - sh / 2), Offset(sx + 3, y + sh / 2), sharpPaint);
-      // Two slanted crossbars
       canvas.drawLine(Offset(sx - 6, y - 2), Offset(sx + 6, y - 5), sharpPaint);
       canvas.drawLine(Offset(sx - 6, y + 4), Offset(sx + 6, y + 1), sharpPaint);
     }
 
-    // 3. Draw Note Head (Tilted oval)
     canvas.save();
     canvas.translate(x, y);
     canvas.rotate(-20.0 * math.pi / 180.0);
@@ -283,21 +369,18 @@ class TrebleStaffPainter extends CustomPainter {
     canvas.drawOval(Rect.fromCenter(center: Offset.zero, width: rx * 2, height: ry * 2), headPaint);
     canvas.restore();
 
-    // 4. Draw Stem (Штиль)
     final stemPaint = Paint()
       ..color = color.withValues(alpha: alpha)
       ..strokeWidth = 1.6;
 
     final stemHeight = lineSpacing * 3.3;
     if (step < 6) {
-      // Stem points UP on the right side of head
       canvas.drawLine(
         Offset(x + rx * 0.85, y),
         Offset(x + rx * 0.85, y - stemHeight),
         stemPaint,
       );
     } else {
-      // Stem points DOWN on the left side of head
       canvas.drawLine(
         Offset(x - rx * 0.85, y),
         Offset(x - rx * 0.85, y + stemHeight),
@@ -305,7 +388,6 @@ class TrebleStaffPainter extends CustomPainter {
       );
     }
 
-    // 5. Note Label text
     if (label != null) {
       final textPainter = TextPainter(
         text: TextSpan(
@@ -327,9 +409,12 @@ class TrebleStaffPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant TrebleStaffPainter oldDelegate) {
     return oldDelegate.targetMidi != targetMidi ||
+        oldDelegate.nextTargetMidi != nextTargetMidi ||
         oldDelegate.playedMidi != playedMidi ||
         oldDelegate.isScratching != isScratching ||
         oldDelegate.isInTune != isInTune ||
+        oldDelegate.isSlurred != isSlurred ||
+        oldDelegate.bowDirection != bowDirection ||
         oldDelegate.noteLabel != noteLabel ||
         oldDelegate.compact != compact;
   }

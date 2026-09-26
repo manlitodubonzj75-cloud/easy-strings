@@ -17,8 +17,14 @@ final class PitchResultNative extends Struct {
   @Uint8()
   external int isScratching;
 
-  @Array<Uint8>(3)
-  external Array<Uint8> reserved;
+  @Uint8()
+  external int isLegato;
+
+  @Uint8()
+  external int rmsEnergy;
+
+  @Uint8()
+  external int reserved;
 }
 
 typedef _PitchCallbackNative = Void Function(
@@ -85,11 +91,15 @@ class PitchResult {
   final double frequencyHz;
   final double confidence;
   final bool isScratching;
+  final bool isLegato;
+  final double rmsEnergy;
 
   const PitchResult({
     required this.frequencyHz,
     required this.confidence,
     required this.isScratching,
+    this.isLegato = false,
+    this.rmsEnergy = 0.0,
   });
 
   @override
@@ -97,7 +107,9 @@ class PitchResult {
     return 'PitchResult('
         'frequencyHz=${frequencyHz.toStringAsFixed(1)}, '
         'confidence=${(confidence * 100).toStringAsFixed(0)}%, '
-        'isScratching=$isScratching'
+        'isScratching=$isScratching, '
+        'isLegato=$isLegato, '
+        'rmsEnergy=${(rmsEnergy * 100).toStringAsFixed(0)}%'
         ')';
   }
 }
@@ -414,6 +426,8 @@ void _workerMain(SendPort parentPort) {
                 frequencyHz: nativeResult.frequencyHz,
                 confidence: nativeResult.confidence,
                 isScratching: nativeResult.isScratching != 0,
+                isLegato: nativeResult.isLegato != 0,
+                rmsEnergy: nativeResult.rmsEnergy / 255.0,
               ),
             );
           },

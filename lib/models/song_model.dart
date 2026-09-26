@@ -1,5 +1,14 @@
 import '../music_theory.dart';
 
+enum BowDirection {
+  down('⊓', 'Вниз смычком'), // Down-bow
+  up('∨', 'Вверх смычком');   // Up-bow
+
+  final String symbol;
+  final String label;
+  const BowDirection(this.symbol, this.label);
+}
+
 class SongNote {
   final int midiNote;
   final int startTimeMs;
@@ -7,6 +16,10 @@ class SongNote {
   final String noteName;
   final ViolinString string;
   final ViolinFinger finger;
+  final bool isSlurStart;
+  final bool isSlurEnd;
+  final int? slurGroupId;
+  final BowDirection? bowDirection;
   bool isHit;
 
   SongNote({
@@ -16,9 +29,14 @@ class SongNote {
     required this.noteName,
     required this.string,
     required this.finger,
+    this.isSlurStart = false,
+    this.isSlurEnd = false,
+    this.slurGroupId,
+    this.bowDirection,
     this.isHit = false,
   });
 
+  bool get isSlurred => slurGroupId != null;
   int get endTimeMs => startTimeMs + durationMs;
 }
 

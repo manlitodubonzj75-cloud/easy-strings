@@ -569,6 +569,17 @@ PitchResult ViolinTracker::processFrame(
     result.frequency_hz = 0.0f;
     result.confidence = 0.0f;
     result.is_scratching = 0;
+    result.is_legato = 0;
+    result.rms_energy = 0;
+    result.reserved = 0;
+
+    // 1. Calculate frame RMS energy
+    double sum_sq = 0.0;
+    for (float s : frame) {
+        sum_sq += static_cast<double>(s) * static_cast<double>(s);
+    }
+    const float rms = static_cast<float>(std::sqrt(sum_sq / static_cast<double>(frame.size())));
+    result.rms_energy = static_cast<std::uint8_t>(std::clamp(rms * 1000.0f, 0.0f, 255.0f));
 
     float confidence = 0.0f;
     const float pitch = calculateMPM(frame, confidence);
@@ -576,9 +587,42 @@ PitchResult ViolinTracker::processFrame(
     result.frequency_hz = pitch;
     result.confidence = confidence;
 
-    if (pitch <= 0.0f || confidence < 0.50f) {
-        result.is_scratching = 1;
+    if (pitch <= 0.0f || confidence < 0.50f || rms < 0.003f) {
+        last_stable_pitch_ = 0.0f;
+        min_rms_transition_ = 0.0f;
+        result.is_scratching = (rms > 0.015f) ? 1 : 0;
         return result;
+    }
+
+    // 2. Legato (Slur) Transition Detection:
+    // Continuous tone without bow reversal/silence dip
+    const int current_midi = static_cast<int>(std::lround(69.0 + 12.0 * std::log2(static_cast<double>(pitch) / 440.0)));
+
+    if (last_stable_pitch_ > 0.0f) {
+        const int prev_midi = static_cast<int>(std::lround(69.0 + 12.0 * std::log2(static_cast<double>(last_stable_pitch_) / 440.0)));
+
+        if (current_midi != prev_midi) {
+            // Note pitch shifted! Check if energy was continuous
+            if (min_rms_transition_ > 0.005f && rms > 0.005f) {
+                // Legato transition: continuous bow stroke across distinct pitches
+                result.is_legato = 1;
+            } else {
+                // Detache: silence dip or bow change before new note
+                result.is_legato = 0;
+            }
+            min_rms_transition_ = rms;
+            last_stable_pitch_ = pitch;
+        } else {
+            // Sustaining current pitch
+            min_rms_transition_ = std::min(min_rms_transition_, rms);
+            last_stable_pitch_ = pitch;
+            result.is_legato = 0;
+        }
+    } else {
+        // Initial onset from silence
+        last_stable_pitch_ = pitch;
+        min_rms_transition_ = rms;
+        result.is_legato = 0;
     }
 
     updatePitchHistory(pitch);

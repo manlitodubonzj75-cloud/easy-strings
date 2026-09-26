@@ -101,7 +101,6 @@ class MidiParser {
           if (velocity > 0) {
             activeNotes[note] = currentTick;
           } else {
-            // Note On with velocity 0 is Note Off
             _handleNoteOff(activeNotes, note, currentTick, ticksPerBeat, tempoUsPerBeat, parsedNotes);
           }
         } else if (eventType == 0x80) {
@@ -140,6 +139,42 @@ class MidiParser {
     }
 
     parsedNotes.sort((a, b) => a.startTimeMs.compareTo(b.startTimeMs));
+
+    // Detect natural slurs (overlapping or zero-gap transitions <= 25ms)
+    int slurCounter = 1;
+    for (int i = 0; i < parsedNotes.length - 1; i++) {
+      final cur = parsedNotes[i];
+      final next = parsedNotes[i + 1];
+      final gap = next.startTimeMs - cur.endTimeMs;
+
+      if (gap <= 25 && gap >= -150) {
+        final gId = cur.slurGroupId ?? slurCounter++;
+        parsedNotes[i] = SongNote(
+          midiNote: cur.midiNote,
+          startTimeMs: cur.startTimeMs,
+          durationMs: cur.durationMs,
+          noteName: cur.noteName,
+          string: cur.string,
+          finger: cur.finger,
+          isSlurStart: cur.slurGroupId == null,
+          isSlurEnd: false,
+          slurGroupId: gId,
+          bowDirection: cur.bowDirection ?? (gId % 2 == 1 ? BowDirection.down : BowDirection.up),
+        );
+        parsedNotes[i + 1] = SongNote(
+          midiNote: next.midiNote,
+          startTimeMs: next.startTimeMs,
+          durationMs: next.durationMs,
+          noteName: next.noteName,
+          string: next.string,
+          finger: next.finger,
+          isSlurStart: false,
+          isSlurEnd: true,
+          slurGroupId: gId,
+          bowDirection: parsedNotes[i].bowDirection,
+        );
+      }
+    }
 
     final bpm = (60000000 / tempoUsPerBeat).round();
     return Song(
@@ -191,28 +226,30 @@ class MidiParser {
 
 class SongLibrary {
   static List<Song> get builtinSongs => [
-    _twinkleTwinkle,
+    _suzukiLegatoEtude,
     _odeToJoy,
     _inTheGarden,
+    _twinkleTwinkle,
     _canonInD,
   ];
 
-  static Song get _twinkleTwinkle {
+  static Song get _suzukiLegatoEtude {
+    // 2 notes slurred on one bow (Down, Up, Down, Up)
     final rawNotes = [
-      (69, 500), (69, 500), (76, 500), (76, 500), (78, 500), (78, 500), (76, 1000),
-      (74, 500), (74, 500), (73, 500), (73, 500), (71, 500), (71, 500), (69, 1000),
-      (76, 500), (76, 500), (74, 500), (74, 500), (73, 500), (73, 500), (71, 1000),
-      (76, 500), (76, 500), (74, 500), (74, 500), (73, 500), (73, 500), (71, 1000),
-      (69, 500), (69, 500), (76, 500), (76, 500), (78, 500), (78, 500), (76, 1000),
-      (74, 500), (74, 500), (73, 500), (73, 500), (71, 500), (71, 500), (69, 1000),
+      (69, 500), (71, 500), // A4, B4 (Slur 1, Down-bow)
+      (73, 500), (74, 500), // C#5, D5 (Slur 2, Up-bow)
+      (76, 500), (74, 500), // E5, D5 (Slur 3, Down-bow)
+      (73, 500), (71, 500), // C#5, B4 (Slur 4, Up-bow)
+      (69, 1000),           // A4 (Detache)
     ];
 
-    return _buildSongFromSequence(
-      id: 'twinkle',
-      title: 'В лесу родилась ёлочка / Twinkle Little Star',
-      composer: 'Ш. Судзуки (Хрестоматия, Тетрадь 1)',
-      tempoBpm: 90,
+    return _buildSongWithSlurs(
+      id: 'suzuki_legato',
+      title: 'Этюд на легато (по 2 ноты на смычок)',
+      composer: 'Ш. Судзуки (Хрестоматия скрипача)',
+      tempoBpm: 80,
       sequence: rawNotes,
+      slurPairs: [0, 2, 4, 6], // indices starting a 2-note slur
     );
   }
 
@@ -228,12 +265,13 @@ class SongLibrary {
       (76, 750), (74, 250), (74, 1000),
     ];
 
-    return _buildSongFromSequence(
+    return _buildSongWithSlurs(
       id: 'ode_to_joy',
       title: 'Ода к радости (Симфония №9)',
       composer: 'Л. ван Бетховен',
       tempoBpm: 100,
       sequence: rawNotes,
+      slurPairs: [0, 2, 4, 6, 8, 10, 15, 17, 19, 21],
     );
   }
 
@@ -245,12 +283,33 @@ class SongLibrary {
       (78, 400), (76, 400), (74, 800),
     ];
 
-    return _buildSongFromSequence(
+    return _buildSongWithSlurs(
       id: 'in_the_garden',
       title: 'Во саду ли, в огороде',
       composer: 'Русская народная песня',
       tempoBpm: 110,
       sequence: rawNotes,
+      slurPairs: [0, 2, 4, 6, 8, 10],
+    );
+  }
+
+  static Song get _twinkleTwinkle {
+    final rawNotes = [
+      (69, 500), (69, 500), (76, 500), (76, 500), (78, 500), (78, 500), (76, 1000),
+      (74, 500), (74, 500), (73, 500), (73, 500), (71, 500), (71, 500), (69, 1000),
+      (76, 500), (76, 500), (74, 500), (74, 500), (73, 500), (73, 500), (71, 1000),
+      (76, 500), (76, 500), (74, 500), (74, 500), (73, 500), (73, 500), (71, 1000),
+      (69, 500), (69, 500), (76, 500), (76, 500), (78, 500), (78, 500), (76, 1000),
+      (74, 500), (74, 500), (73, 500), (73, 500), (71, 500), (71, 500), (69, 1000),
+    ];
+
+    return _buildSongWithSlurs(
+      id: 'twinkle',
+      title: 'В лесу родилась ёлочка / Twinkle Little Star',
+      composer: 'Ш. Судзуки (Хрестоматия, Тетрадь 1)',
+      tempoBpm: 90,
+      sequence: rawNotes,
+      slurPairs: [],
     );
   }
 
@@ -262,26 +321,31 @@ class SongLibrary {
       (67, 800), (66, 800), (67, 800), (69, 800),
     ];
 
-    return _buildSongFromSequence(
+    return _buildSongWithSlurs(
       id: 'canon_in_d',
       title: 'Канон в Ре мажоре',
       composer: 'И. Пахельбель',
       tempoBpm: 75,
       sequence: rawNotes,
+      slurPairs: [0, 2, 4, 6, 8, 10, 12, 14],
     );
   }
 
-  static Song _buildSongFromSequence({
+  static Song _buildSongWithSlurs({
     required String id,
     required String title,
     required String composer,
     required int tempoBpm,
     required List<(int, int)> sequence,
+    required List<int> slurPairs,
   }) {
     final notes = <SongNote>[];
     int currentMs = 500;
+    int slurId = 0;
+    BowDirection bow = BowDirection.down;
 
-    for (final item in sequence) {
+    for (int i = 0; i < sequence.length; i++) {
+      final item = sequence[i];
       final midi = item.$1;
       final duration = item.$2;
 
@@ -298,6 +362,17 @@ class SongLibrary {
         ),
       );
 
+      final isSlurStart = slurPairs.contains(i);
+      final isSlurEnd = slurPairs.contains(i - 1);
+      final inSlur = isSlurStart || isSlurEnd;
+
+      if (isSlurStart) {
+        slurId++;
+        bow = (slurId % 2 == 1) ? BowDirection.down : BowDirection.up;
+      } else if (!inSlur) {
+        bow = (i % 2 == 0) ? BowDirection.down : BowDirection.up;
+      }
+
       notes.add(SongNote(
         midiNote: midi,
         startTimeMs: currentMs,
@@ -305,6 +380,10 @@ class SongLibrary {
         noteName: fingering.noteName,
         string: fingering.string,
         finger: fingering.finger,
+        isSlurStart: isSlurStart,
+        isSlurEnd: isSlurEnd,
+        slurGroupId: inSlur ? slurId : null,
+        bowDirection: bow,
       ));
 
       currentMs += duration;
