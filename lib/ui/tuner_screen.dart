@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../audio_engine.dart';
 import '../music_theory.dart';
+import 'widgets/musical_staff_view.dart';
 
 class TunerScreen extends StatefulWidget {
   final AudioEngine audioEngine;
@@ -9,6 +10,7 @@ class TunerScreen extends StatefulWidget {
   final ValueChanged<ViolinString?> onStringSelected;
   final double concertA4Hz;
   final ValueChanged<double> onConcertPitchChanged;
+  final bool isMobileMode;
 
   const TunerScreen({
     super.key,
@@ -18,6 +20,7 @@ class TunerScreen extends StatefulWidget {
     required this.onStringSelected,
     required this.concertA4Hz,
     required this.onConcertPitchChanged,
+    this.isMobileMode = false,
   });
 
   @override
@@ -32,35 +35,48 @@ class _TunerScreenState extends State<TunerScreen> {
     final cents = note?.cents ?? 0.0;
     final isInTune = note?.isInTune ?? false;
     final isScratching = note?.isScratching ?? false;
+    final isMobile = widget.isMobileMode;
 
     return SingleChildScrollView(
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+      padding: EdgeInsets.symmetric(horizontal: isMobile ? 12 : 20, vertical: isMobile ? 10 : 16),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           // Concert pitch calibration toolbar (440 vs 442 Hz)
-          _buildCalibrationBar(),
-          const SizedBox(height: 16),
+          _buildCalibrationBar(isMobile),
+          SizedBox(height: isMobile ? 10 : 16),
 
           // String Selector Bar
-          _buildStringSelector(),
-          const SizedBox(height: 20),
+          _buildStringSelector(isMobile),
+          SizedBox(height: isMobile ? 12 : 18),
+
+          // Musical Staff Notation View (Нотный стан в реальном времени)
+          MusicalStaffView(
+            targetMidi: note?.midiNote,
+            playedMidi: note?.midiNote,
+            isScratching: isScratching,
+            isInTune: isInTune,
+            noteLabel: note != null ? '${note.noteName} (${note.rawHz.toStringAsFixed(1)} Hz)' : 'Сыграйте ноту',
+            height: isMobile ? 86 : 100,
+            compact: isMobile,
+          ),
+          SizedBox(height: isMobile ? 12 : 16),
 
           // Directional Peg Guidance (Chevron Indicator)
-          _buildPegGuidanceBanner(note),
-          const SizedBox(height: 16),
+          _buildPegGuidanceBanner(note, isMobile),
+          SizedBox(height: isMobile ? 12 : 16),
 
           // Main Tuner Gauge with Segmented LEDs
-          _buildTunerGauge(cents, isInTune, isListening, note),
-          const SizedBox(height: 20),
+          _buildTunerGauge(cents, isInTune, isListening, note, isMobile),
+          SizedBox(height: isMobile ? 12 : 18),
 
           // Tone & Bowing Quality Card
-          _buildBowingQualityCard(note, isScratching),
-          const SizedBox(height: 16),
+          _buildBowingQualityCard(note, isScratching, isMobile),
+          SizedBox(height: isMobile ? 10 : 16),
 
           // Fingering recommendation card
           if (note?.bestFingering != null) ...[
-            _buildFingeringCard(note!.bestFingering!),
+            _buildFingeringCard(note!.bestFingering!, isMobile),
             const SizedBox(height: 16),
           ],
         ],
@@ -68,9 +84,9 @@ class _TunerScreenState extends State<TunerScreen> {
     );
   }
 
-  Widget _buildCalibrationBar() {
+  Widget _buildCalibrationBar(bool isMobile) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      padding: EdgeInsets.symmetric(horizontal: isMobile ? 10 : 16, vertical: isMobile ? 8 : 10),
       decoration: BoxDecoration(
         color: const Color(0xFF1E2230),
         borderRadius: BorderRadius.circular(16),
@@ -81,12 +97,12 @@ class _TunerScreenState extends State<TunerScreen> {
         children: [
           Row(
             children: [
-              const Icon(Icons.tune, color: Color(0xFF6366F1), size: 18),
-              const SizedBox(width: 8),
+              const Icon(Icons.tune, color: Color(0xFF6366F1), size: 16),
+              const SizedBox(width: 6),
               Text(
-                'Эталон A4: ${widget.concertA4Hz.toStringAsFixed(0)} Hz',
-                style: const TextStyle(
-                  fontSize: 13,
+                'A4: ${widget.concertA4Hz.toStringAsFixed(0)} Hz',
+                style: TextStyle(
+                  fontSize: isMobile ? 12 : 13,
                   fontWeight: FontWeight.bold,
                   color: Colors.white,
                 ),
@@ -95,9 +111,9 @@ class _TunerScreenState extends State<TunerScreen> {
           ),
           Row(
             children: [
-              _buildPitchPresetButton(440.0, '440 Hz (Стандарт)'),
+              _buildPitchPresetButton(440.0, '440 Hz', isMobile),
               const SizedBox(width: 6),
-              _buildPitchPresetButton(442.0, '442 Hz (Оркестр)'),
+              _buildPitchPresetButton(442.0, '442 Hz (Оркестр)', isMobile),
             ],
           ),
         ],
@@ -105,13 +121,13 @@ class _TunerScreenState extends State<TunerScreen> {
     );
   }
 
-  Widget _buildPitchPresetButton(double hz, String label) {
+  Widget _buildPitchPresetButton(double hz, String label, bool isMobile) {
     final isSelected = (widget.concertA4Hz - hz).abs() < 0.1;
     return GestureDetector(
       onTap: () => widget.onConcertPitchChanged(hz),
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 180),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        padding: EdgeInsets.symmetric(horizontal: isMobile ? 8 : 10, vertical: 5),
         decoration: BoxDecoration(
           color: isSelected ? const Color(0xFF6366F1) : const Color(0xFF282C3D),
           borderRadius: BorderRadius.circular(8),
@@ -122,7 +138,7 @@ class _TunerScreenState extends State<TunerScreen> {
         child: Text(
           label,
           style: TextStyle(
-            fontSize: 11,
+            fontSize: isMobile ? 10 : 11,
             fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
             color: isSelected ? Colors.white : Colors.white60,
           ),
@@ -131,10 +147,10 @@ class _TunerScreenState extends State<TunerScreen> {
     );
   }
 
-  Widget _buildPegGuidanceBanner(DetectedNoteInfo? note) {
+  Widget _buildPegGuidanceBanner(DetectedNoteInfo? note, bool isMobile) {
     if (note == null) {
       return Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        padding: EdgeInsets.symmetric(horizontal: 14, vertical: isMobile ? 8 : 10),
         decoration: BoxDecoration(
           color: const Color(0xFF141722),
           borderRadius: BorderRadius.circular(12),
@@ -172,7 +188,7 @@ class _TunerScreenState extends State<TunerScreen> {
     }
 
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+      padding: EdgeInsets.symmetric(horizontal: 16, vertical: isMobile ? 8 : 12),
       decoration: BoxDecoration(
         color: bannerColor.withValues(alpha: 0.15),
         borderRadius: BorderRadius.circular(16),
@@ -185,29 +201,29 @@ class _TunerScreenState extends State<TunerScreen> {
             Text(
               chevronLeft,
               style: TextStyle(
-                fontSize: 20,
+                fontSize: isMobile ? 16 : 20,
                 fontWeight: FontWeight.w900,
                 color: bannerColor,
                 letterSpacing: 2,
               ),
             ),
-            const SizedBox(width: 12),
+            const SizedBox(width: 8),
           ],
           Text(
             actionTitle,
             style: TextStyle(
-              fontSize: 13,
+              fontSize: isMobile ? 12 : 13,
               fontWeight: FontWeight.w900,
               color: bannerColor,
               letterSpacing: 0.5,
             ),
           ),
           if (chevronRight.isNotEmpty) ...[
-            const SizedBox(width: 12),
+            const SizedBox(width: 8),
             Text(
               chevronRight,
               style: TextStyle(
-                fontSize: 20,
+                fontSize: isMobile ? 16 : 20,
                 fontWeight: FontWeight.w900,
                 color: bannerColor,
                 letterSpacing: 2,
@@ -219,42 +235,42 @@ class _TunerScreenState extends State<TunerScreen> {
     );
   }
 
-  Widget _buildStringSelector() {
+  Widget _buildStringSelector(bool isMobile) {
     return Container(
-      padding: const EdgeInsets.all(6),
+      padding: const EdgeInsets.all(4),
       decoration: BoxDecoration(
         color: const Color(0xFF1E2230),
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(14),
         border: Border.all(color: Colors.white10),
       ),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
         children: [
-          _buildStringTab(null, 'Auto'),
-          _buildStringTab(ViolinString.g, 'G (${ViolinString.g.openHz(widget.concertA4Hz).toStringAsFixed(0)})'),
-          _buildStringTab(ViolinString.d, 'D (${ViolinString.d.openHz(widget.concertA4Hz).toStringAsFixed(0)})'),
-          _buildStringTab(ViolinString.a, 'A (${ViolinString.a.openHz(widget.concertA4Hz).toStringAsFixed(0)})'),
-          _buildStringTab(ViolinString.e, 'E (${ViolinString.e.openHz(widget.concertA4Hz).toStringAsFixed(0)})'),
+          _buildStringTab(null, 'Auto', isMobile),
+          _buildStringTab(ViolinString.g, 'G', isMobile),
+          _buildStringTab(ViolinString.d, 'D', isMobile),
+          _buildStringTab(ViolinString.a, 'A', isMobile),
+          _buildStringTab(ViolinString.e, 'E', isMobile),
         ],
       ),
     );
   }
 
-  Widget _buildStringTab(ViolinString? string, String label) {
+  Widget _buildStringTab(ViolinString? string, String label, bool isMobile) {
     final isSelected = widget.selectedString == string;
     return GestureDetector(
       onTap: () => widget.onStringSelected(string),
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        padding: EdgeInsets.symmetric(horizontal: isMobile ? 12 : 16, vertical: 6),
         decoration: BoxDecoration(
           color: isSelected ? const Color(0xFF6366F1) : Colors.transparent,
-          borderRadius: BorderRadius.circular(10),
+          borderRadius: BorderRadius.circular(8),
         ),
         child: Text(
           label,
           style: TextStyle(
-            fontSize: 12,
+            fontSize: isMobile ? 11 : 12,
             fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
             color: isSelected ? Colors.white : Colors.white70,
           ),
@@ -268,18 +284,19 @@ class _TunerScreenState extends State<TunerScreen> {
     bool isInTune,
     bool isListening,
     DetectedNoteInfo? note,
+    bool isMobile,
   ) {
     final statusColor = !isListening || note == null
         ? Colors.grey
         : isInTune
-            ? const Color(0xFF10B981) // Green
+            ? const Color(0xFF10B981)
             : (cents > 0 ? const Color(0xFFF59E0B) : const Color(0xFF3B82F6));
 
     return Container(
-      padding: const EdgeInsets.all(24),
+      padding: EdgeInsets.all(isMobile ? 16 : 24),
       decoration: BoxDecoration(
         color: const Color(0xFF181B26),
-        borderRadius: BorderRadius.circular(28),
+        borderRadius: BorderRadius.circular(24),
         border: Border.all(
           color: isInTune ? const Color(0xFF10B981).withValues(alpha: 0.5) : Colors.white10,
           width: isInTune ? 2 : 1,
@@ -288,53 +305,50 @@ class _TunerScreenState extends State<TunerScreen> {
           if (isInTune)
             BoxShadow(
               color: const Color(0xFF10B981).withValues(alpha: 0.2),
-              blurRadius: 32,
-              spreadRadius: 4,
+              blurRadius: 28,
+              spreadRadius: 3,
             ),
         ],
       ),
       child: Column(
         children: [
-          // Target Note Name
           Text(
             note?.noteName ?? '—',
             style: TextStyle(
-              fontSize: 60,
+              fontSize: isMobile ? 48 : 58,
               fontWeight: FontWeight.w900,
               letterSpacing: -1,
               color: statusColor,
             ),
           ),
-          const SizedBox(height: 4),
-
-          // Frequency in Hz
+          const SizedBox(height: 2),
           Text(
             note != null
                 ? '${note.rawHz.toStringAsFixed(1)} Hz (Цель: ${note.targetHz.toStringAsFixed(1)} Hz)'
                 : 'Ожидание звука скрипки...',
             style: const TextStyle(
-              fontSize: 13,
+              fontSize: 12,
               color: Colors.white54,
               fontFamily: 'monospace',
             ),
           ),
-          const SizedBox(height: 24),
+          SizedBox(height: isMobile ? 16 : 22),
 
-          // Segmented LED VU-Meter (Instrutune inspired)
-          _buildSegmentedLedMeter(cents, isInTune, statusColor),
-          const SizedBox(height: 16),
+          // Segmented LED VU-Meter
+          _buildSegmentedLedMeter(cents, isInTune, statusColor, isMobile),
+          SizedBox(height: isMobile ? 12 : 16),
 
           // Status Badge
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
             decoration: BoxDecoration(
               color: statusColor.withValues(alpha: 0.15),
-              borderRadius: BorderRadius.circular(20),
+              borderRadius: BorderRadius.circular(16),
             ),
             child: Text(
               note?.tuningStatus ?? 'Сыграйте ноту смычком',
               style: TextStyle(
-                fontSize: 14,
+                fontSize: isMobile ? 12 : 13,
                 fontWeight: FontWeight.bold,
                 color: statusColor,
               ),
@@ -345,27 +359,26 @@ class _TunerScreenState extends State<TunerScreen> {
     );
   }
 
-  Widget _buildSegmentedLedMeter(double cents, bool isInTune, Color statusColor) {
-    const int numSegmentsPerSide = 12;
+  Widget _buildSegmentedLedMeter(double cents, bool isInTune, Color statusColor, bool isMobile) {
+    final int numSegmentsPerSide = isMobile ? 9 : 12;
 
     return Column(
       children: [
         Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            // Left segments (Flat / Низит)
             for (int i = numSegmentsPerSide; i >= 1; i--) ...[
               _buildLedSegment(
                 isActive: cents < -5 && (-cents >= (i * (45.0 / numSegmentsPerSide))),
                 color: const Color(0xFF3B82F6),
+                isMobile: isMobile,
               ),
               const SizedBox(width: 2),
             ],
 
-            // Center Lock LED (In Tune)
             Container(
-              width: 14,
-              height: 28,
+              width: isMobile ? 12 : 14,
+              height: isMobile ? 24 : 28,
               decoration: BoxDecoration(
                 color: isInTune ? const Color(0xFF10B981) : Colors.white24,
                 borderRadius: BorderRadius.circular(4),
@@ -381,25 +394,25 @@ class _TunerScreenState extends State<TunerScreen> {
             ),
             const SizedBox(width: 2),
 
-            // Right segments (Sharp / Высит)
             for (int i = 1; i <= numSegmentsPerSide; i++) ...[
               _buildLedSegment(
                 isActive: cents > 5 && (cents >= (i * (45.0 / numSegmentsPerSide))),
                 color: const Color(0xFFF59E0B),
+                isMobile: isMobile,
               ),
               if (i < numSegmentsPerSide) const SizedBox(width: 2),
             ],
           ],
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 10),
         const Padding(
           padding: EdgeInsets.symmetric(horizontal: 8),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text('-50¢ (Низит)', style: TextStyle(fontSize: 11, color: Color(0xFF3B82F6))),
-              Text('0¢ (В строю)', style: TextStyle(fontSize: 11, color: Color(0xFF10B981), fontWeight: FontWeight.bold)),
-              Text('+50¢ (Высит)', style: TextStyle(fontSize: 11, color: Color(0xFFF59E0B))),
+              Text('-50¢ (Низит)', style: TextStyle(fontSize: 10, color: Color(0xFF3B82F6))),
+              Text('0¢ (В строю)', style: TextStyle(fontSize: 10, color: Color(0xFF10B981), fontWeight: FontWeight.bold)),
+              Text('+50¢ (Высит)', style: TextStyle(fontSize: 10, color: Color(0xFFF59E0B))),
             ],
           ),
         ),
@@ -407,10 +420,10 @@ class _TunerScreenState extends State<TunerScreen> {
     );
   }
 
-  Widget _buildLedSegment({required bool isActive, required Color color}) {
+  Widget _buildLedSegment({required bool isActive, required Color color, required bool isMobile}) {
     return Container(
-      width: 7,
-      height: 20,
+      width: isMobile ? 5 : 7,
+      height: isMobile ? 16 : 20,
       decoration: BoxDecoration(
         color: isActive ? color : const Color(0xFF242838),
         borderRadius: BorderRadius.circular(2),
@@ -418,17 +431,17 @@ class _TunerScreenState extends State<TunerScreen> {
           if (isActive)
             BoxShadow(
               color: color.withValues(alpha: 0.6),
-              blurRadius: 6,
+              blurRadius: 5,
             ),
         ],
       ),
     );
   }
 
-  Widget _buildBowingQualityCard(DetectedNoteInfo? note, bool isScratching) {
+  Widget _buildBowingQualityCard(DetectedNoteInfo? note, bool isScratching, bool isMobile) {
     if (note == null) {
       return Container(
-        padding: const EdgeInsets.all(16),
+        padding: EdgeInsets.all(isMobile ? 12 : 16),
         decoration: BoxDecoration(
           color: const Color(0xFF181B26),
           borderRadius: BorderRadius.circular(16),
@@ -436,12 +449,12 @@ class _TunerScreenState extends State<TunerScreen> {
         ),
         child: const Row(
           children: [
-            Icon(Icons.mic, color: Colors.white38, size: 24),
-            SizedBox(width: 12),
+            Icon(Icons.mic, color: Colors.white38, size: 20),
+            SizedBox(width: 10),
             Expanded(
               child: Text(
                 'Микрофон слушает инструмент через C++ DSP движок',
-                style: TextStyle(color: Colors.white54, fontSize: 13),
+                style: TextStyle(color: Colors.white54, fontSize: 12),
               ),
             ),
           ],
@@ -451,12 +464,12 @@ class _TunerScreenState extends State<TunerScreen> {
 
     final isClean = !isScratching;
     return Container(
-      padding: const EdgeInsets.all(18),
+      padding: EdgeInsets.all(isMobile ? 12 : 16),
       decoration: BoxDecoration(
         color: isClean
             ? const Color(0xFF10B981).withValues(alpha: 0.1)
             : const Color(0xFFEF4444).withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(20),
+        borderRadius: BorderRadius.circular(16),
         border: Border.all(
           color: isClean
               ? const Color(0xFF10B981).withValues(alpha: 0.3)
@@ -466,7 +479,7 @@ class _TunerScreenState extends State<TunerScreen> {
       child: Row(
         children: [
           Container(
-            padding: const EdgeInsets.all(10),
+            padding: const EdgeInsets.all(8),
             decoration: BoxDecoration(
               color: isClean ? const Color(0xFF10B981) : const Color(0xFFEF4444),
               shape: BoxShape.circle,
@@ -474,19 +487,19 @@ class _TunerScreenState extends State<TunerScreen> {
             child: Icon(
               isClean ? Icons.check : Icons.warning_amber_rounded,
               color: Colors.white,
-              size: 20,
+              size: 18,
             ),
           ),
-          const SizedBox(width: 16),
+          const SizedBox(width: 12),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  isClean ? 'Чистый звук смычка' : 'Обнаружен скрежет смычка',
+                  isClean ? 'Чистый звук смычка' : 'Скрежет смычка!',
                   style: TextStyle(
                     fontWeight: FontWeight.bold,
-                    fontSize: 14,
+                    fontSize: isMobile ? 13 : 14,
                     color: isClean ? const Color(0xFF10B981) : const Color(0xFFEF4444),
                   ),
                 ),
@@ -495,7 +508,7 @@ class _TunerScreenState extends State<TunerScreen> {
                   isClean
                       ? 'Гармонический спектр чистый. Отличное ведение смычка!'
                       : 'Ослабьте нажим смычка или ведите перпендикулярнее струне.',
-                  style: const TextStyle(fontSize: 12, color: Colors.white70),
+                  style: const TextStyle(fontSize: 11, color: Colors.white70),
                 ),
               ],
             ),
@@ -505,12 +518,12 @@ class _TunerScreenState extends State<TunerScreen> {
     );
   }
 
-  Widget _buildFingeringCard(ViolinFingering fingering) {
+  Widget _buildFingeringCard(ViolinFingering fingering, bool isMobile) {
     return Container(
-      padding: const EdgeInsets.all(18),
+      padding: EdgeInsets.all(isMobile ? 12 : 16),
       decoration: BoxDecoration(
         color: const Color(0xFF181B26),
-        borderRadius: BorderRadius.circular(20),
+        borderRadius: BorderRadius.circular(16),
         border: Border.all(color: Colors.white10),
       ),
       child: Row(
@@ -521,13 +534,13 @@ class _TunerScreenState extends State<TunerScreen> {
             children: [
               const Text(
                 'Аппликатура (1-я позиция)',
-                style: TextStyle(fontSize: 12, color: Colors.white38),
+                style: TextStyle(fontSize: 11, color: Colors.white38),
               ),
-              const SizedBox(height: 4),
+              const SizedBox(height: 2),
               Text(
                 'Струна ${fingering.string.name} • ${fingering.finger.label}',
-                style: const TextStyle(
-                  fontSize: 16,
+                style: TextStyle(
+                  fontSize: isMobile ? 14 : 15,
                   fontWeight: FontWeight.bold,
                   color: Colors.white,
                 ),
@@ -535,17 +548,17 @@ class _TunerScreenState extends State<TunerScreen> {
             ],
           ),
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
             decoration: BoxDecoration(
               color: Color(fingering.string.colorHex).withValues(alpha: 0.2),
-              borderRadius: BorderRadius.circular(12),
+              borderRadius: BorderRadius.circular(10),
               border: Border.all(color: Color(fingering.string.colorHex)),
             ),
             child: Text(
               fingering.string.name,
               style: TextStyle(
                 fontWeight: FontWeight.w900,
-                fontSize: 18,
+                fontSize: 16,
                 color: Color(fingering.string.colorHex),
               ),
             ),

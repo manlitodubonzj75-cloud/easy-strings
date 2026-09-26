@@ -5,20 +5,23 @@ import '../audio_engine.dart';
 import '../models/song_model.dart';
 import '../music_theory.dart';
 import '../services/midi_parser.dart';
+import 'widgets/musical_staff_view.dart';
 
 enum PracticeMode {
-  waitNote, // Waits for user to play note before advancing
-  playAlong, // Continuous scrolling at tempo
+  waitNote, // Waits for user to play note cleanly before advancing
+  playAlong, // Tempo scrolling that pauses on errors until resolved
 }
 
 class SongPracticeScreen extends StatefulWidget {
   final AudioEngine audioEngine;
   final DetectedNoteInfo? currentNote;
+  final bool isMobileMode;
 
   const SongPracticeScreen({
     super.key,
     required this.audioEngine,
     required this.currentNote,
+    this.isMobileMode = false,
   });
 
   @override
@@ -31,6 +34,8 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
 
   PracticeMode _practiceMode = PracticeMode.waitNote;
   bool _isPlaying = false;
+  bool _isSoundError = false;
+  String _soundErrorMessage = '';
 
   int _currentNoteIndex = 0;
   int _playbackTimeMs = 0;
@@ -60,6 +65,8 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
     _playbackTimer?.cancel();
     setState(() {
       _isPlaying = false;
+      _isSoundError = false;
+      _soundErrorMessage = '';
       _currentNoteIndex = 0;
       _playbackTimeMs = 0;
       _score = 0;
@@ -73,19 +80,22 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
   void _startPlayback() {
     setState(() {
       _isPlaying = true;
+      _isSoundError = false;
     });
 
     if (_practiceMode == PracticeMode.playAlong) {
       _playbackTimer = Timer.periodic(const Duration(milliseconds: 30), (timer) {
-        setState(() {
-          _playbackTimeMs += 30;
-          _checkPlayAlongHit();
+        if (!_isSoundError) {
+          setState(() {
+            _playbackTimeMs += 30;
+            _checkPlayAlongHit();
 
-          if (_playbackTimeMs >= _currentSong.totalDurationMs) {
-            _playbackTimer?.cancel();
-            _isPlaying = false;
-          }
-        });
+            if (_playbackTimeMs >= _currentSong.totalDurationMs) {
+              _playbackTimer?.cancel();
+              _isPlaying = false;
+            }
+          });
+        }
       });
     }
   }
@@ -105,16 +115,49 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
 
   void _evaluateLivePitch() {
     final note = widget.currentNote;
-    if (note == null || _currentNoteIndex >= _currentSong.notes.length) return;
+    if (_currentNoteIndex >= _currentSong.notes.length) return;
 
     final targetNote = _currentSong.notes[_currentNoteIndex];
+
+    if (note == null) {
+      return;
+    }
+
     final isCorrectPitch = note.midiNote == targetNote.midiNote;
     final isCleanTone = !note.isScratching && note.isInTune;
 
+    if (note.isScratching) {
+      // Sound production error: bow scratching/crushing
+      setState(() {
+        _isSoundError = true;
+        _soundErrorMessage = 'Скрежет смычка! Ослабьте нажим смычка на струну.';
+        _streak = 0;
+      });
+      return;
+    }
+
+    if (isCorrectPitch && !note.isInTune) {
+      // Pitch intonation error
+      setState(() {
+        _isSoundError = true;
+        _soundErrorMessage = note.cents < 0 ? 'Палец низит! Сдвиньте палец ближе к подставке.' : 'Палец высит! Сдвиньте палец ближе к порожку.';
+      });
+      return;
+    }
+
+    if (!isCorrectPitch && note.confidence > 0.6) {
+      // Wrong note entirely
+      setState(() {
+        _isSoundError = true;
+        _soundErrorMessage = 'Не та нота (${note.noteName}). Сыграйте ${targetNote.noteName}.';
+      });
+      return;
+    }
+
+    // SUCCESSFUL CLEAN SOUND PRODUCTION
     if (isCorrectPitch && isCleanTone) {
       final now = DateTime.now();
-      // Debounce slightly (200ms) to avoid multiple hits for one note
-      if (now.difference(_lastHitTime).inMilliseconds > 200) {
+      if (now.difference(_lastHitTime).inMilliseconds > 220) {
         _lastHitTime = now;
         _onNoteSuccess(targetNote);
       }
@@ -123,43 +166,42 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
 
   void _checkPlayAlongHit() {
     final note = widget.currentNote;
-    if (note == null || _currentNoteIndex >= _currentSong.notes.length) return;
+    if (_currentNoteIndex >= _currentSong.notes.length) return;
 
     final targetNote = _currentSong.notes[_currentNoteIndex];
-    final windowStart = targetNote.startTimeMs - 250;
-    final windowEnd = targetNote.endTimeMs + 200;
+    final windowStart = targetNote.startTimeMs - 300;
+    final windowEnd = targetNote.endTimeMs + 100;
 
     if (_playbackTimeMs >= windowStart && _playbackTimeMs <= windowEnd) {
-      if (note.midiNote == targetNote.midiNote && !targetNote.isHit) {
+      if (note != null && note.midiNote == targetNote.midiNote && !note.isScratching && note.isInTune && !targetNote.isHit) {
         _onNoteSuccess(targetNote);
       }
     } else if (_playbackTimeMs > windowEnd && !targetNote.isHit) {
-      // Missed note
-      if (_currentNoteIndex < _currentSong.notes.length - 1) {
-        _currentNoteIndex++;
-        _streak = 0;
-      }
+      // IMPORTANT REQUIREMENT: DO NOT auto-advance to next note on error!
+      // Freeze playback right at target note and prompt user to play it cleanly!
+      setState(() {
+        _isSoundError = true;
+        _soundErrorMessage = 'Возьмите чистый звук для ноты ${targetNote.noteName}!';
+        _playbackTimeMs = targetNote.endTimeMs; // Freeze cursor at note
+      });
     }
   }
 
   void _onNoteSuccess(SongNote targetNote) {
     setState(() {
       targetNote.isHit = true;
+      _isSoundError = false;
+      _soundErrorMessage = '';
       _score += 150 + (_streak * 10);
       _streak++;
       if (_streak > _bestStreak) _bestStreak = _streak;
 
-      if (_practiceMode == PracticeMode.waitNote) {
-        if (_currentNoteIndex < _currentSong.notes.length - 1) {
-          _currentNoteIndex++;
-        } else {
-          _isPlaying = false;
-          _showCompletionDialog();
-        }
+      if (_currentNoteIndex < _currentSong.notes.length - 1) {
+        _currentNoteIndex++;
       } else {
-        if (_currentNoteIndex < _currentSong.notes.length - 1) {
-          _currentNoteIndex++;
-        }
+        _isPlaying = false;
+        _playbackTimer?.cancel();
+        _showCompletionDialog();
       }
     });
   }
@@ -174,7 +216,7 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF181B26),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Text('🎉 Упражнение пройдено!', style: TextStyle(color: Colors.white)),
+        title: const Text('🎉 Произведение сыграно!', style: TextStyle(color: Colors.white)),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -211,7 +253,7 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text(
-              'Укажите абсолютный путь к любому .mid файлу партии скрипки или скана нот:',
+              'Укажите путь к .mid файлу партии скрипки или распознанному скану нот:',
               style: TextStyle(fontSize: 12, color: Colors.white70),
             ),
             const SizedBox(height: 12),
@@ -362,22 +404,44 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
         ? _currentSong.notes[_currentNoteIndex]
         : null;
 
+    final isMobile = widget.isMobileMode;
+
     return Column(
       children: [
         // Top Toolbar: Song title, Mode switcher, Score
-        _buildHeaderToolbar(),
+        _buildHeaderToolbar(isMobile),
+
+        // Sound Error Warning Banner (shown when scratch or wrong pitch is detected)
+        if (_isSoundError) _buildSoundErrorBanner(),
+
+        // Musical Staff Sheet View (Ноты на стане со скрипичным ключом)
+        Padding(
+          padding: EdgeInsets.symmetric(horizontal: isMobile ? 12 : 16, vertical: 4),
+          child: MusicalStaffView(
+            targetMidi: targetNote?.midiNote,
+            playedMidi: widget.currentNote?.midiNote,
+            isScratching: widget.currentNote?.isScratching ?? false,
+            isInTune: widget.currentNote?.isInTune ?? false,
+            noteLabel: targetNote != null ? '${targetNote.noteName} (Стр. ${targetNote.string.name}, ${targetNote.finger.number}п)' : null,
+            height: isMobile ? 86 : 105,
+            compact: isMobile,
+          ),
+        ),
 
         // Target Note Fingering Prompt
-        if (targetNote != null) _buildTargetNotePrompt(targetNote),
+        if (targetNote != null) _buildTargetNotePrompt(targetNote, isMobile),
 
-        // Interactive Note Highway / Sheet View
+        // Interactive Note Highway / Timeline
         Expanded(
           child: Container(
-            margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            margin: EdgeInsets.symmetric(horizontal: isMobile ? 12 : 16, vertical: 6),
             decoration: BoxDecoration(
               color: const Color(0xFF12141D),
               borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: Colors.white10),
+              border: Border.all(
+                color: _isSoundError ? const Color(0xFFEF4444).withValues(alpha: 0.5) : Colors.white10,
+                width: _isSoundError ? 2 : 1,
+              ),
             ),
             child: ClipRRect(
               borderRadius: BorderRadius.circular(20),
@@ -401,14 +465,44 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
         ),
 
         // Bottom Controls: Play/Pause, Reset, Song Selector
-        _buildPlaybackControls(targetNote),
+        _buildPlaybackControls(targetNote, isMobile),
       ],
     );
   }
 
-  Widget _buildHeaderToolbar() {
+  Widget _buildSoundErrorBanner() {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      decoration: BoxDecoration(
+        color: const Color(0xFFEF4444).withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFEF4444).withValues(alpha: 0.5)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.error_outline, color: Color(0xFFEF4444), size: 18),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              _soundErrorMessage.isNotEmpty
+                  ? _soundErrorMessage
+                  : 'Ошибка звукоизвлечения! Возьмите чистый звук смычком.',
+              style: const TextStyle(
+                color: Color(0xFFEF4444),
+                fontWeight: FontWeight.bold,
+                fontSize: 12,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildHeaderToolbar(bool isMobile) {
+    return Container(
+      padding: EdgeInsets.symmetric(horizontal: isMobile ? 12 : 16, vertical: isMobile ? 6 : 10),
       decoration: const BoxDecoration(
         color: Color(0xFF141722),
         border: Border(bottom: BorderSide(color: Colors.white10)),
@@ -421,7 +515,7 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
               onTap: _showSongPicker,
               borderRadius: BorderRadius.circular(12),
               child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+                padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 4),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -431,20 +525,20 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
                           child: Text(
                             _currentSong.title,
                             overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              fontSize: 14,
+                            style: TextStyle(
+                              fontSize: isMobile ? 13 : 14,
                               fontWeight: FontWeight.bold,
                               color: Colors.white,
                             ),
                           ),
                         ),
-                        const SizedBox(width: 4),
-                        const Icon(Icons.arrow_drop_down, color: Colors.white54, size: 18),
+                        const SizedBox(width: 2),
+                        const Icon(Icons.arrow_drop_down, color: Colors.white54, size: 16),
                       ],
                     ),
                     Text(
                       _currentSong.composer,
-                      style: const TextStyle(fontSize: 11, color: Colors.white54),
+                      style: const TextStyle(fontSize: 10, color: Colors.white54),
                     ),
                   ],
                 ),
@@ -454,34 +548,34 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
 
           // Practice Mode Toggle: "Ждать ноту" vs "В темпе"
           Container(
-            padding: const EdgeInsets.all(3),
+            padding: const EdgeInsets.all(2),
             decoration: BoxDecoration(
               color: const Color(0xFF222636),
-              borderRadius: BorderRadius.circular(10),
+              borderRadius: BorderRadius.circular(8),
             ),
             child: Row(
               children: [
-                _buildModeTab(PracticeMode.waitNote, 'Ждать ноту'),
-                _buildModeTab(PracticeMode.playAlong, 'В темпе'),
+                _buildModeTab(PracticeMode.waitNote, 'Ждать ноту', isMobile),
+                _buildModeTab(PracticeMode.playAlong, 'В темпе', isMobile),
               ],
             ),
           ),
-          const SizedBox(width: 12),
+          SizedBox(width: isMobile ? 6 : 12),
 
           // Score & Streak
           Column(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
               Text(
-                '$_score очков',
-                style: const TextStyle(
-                  fontSize: 13,
+                '$_score',
+                style: TextStyle(
+                  fontSize: isMobile ? 12 : 13,
                   fontWeight: FontWeight.w900,
-                  color: Color(0xFFF59E0B),
+                  color: const Color(0xFFF59E0B),
                 ),
               ),
               Text(
-                'Серия: x$_streak',
+                'x$_streak',
                 style: const TextStyle(fontSize: 10, color: Color(0xFF10B981), fontWeight: FontWeight.bold),
               ),
             ],
@@ -491,7 +585,7 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
     );
   }
 
-  Widget _buildModeTab(PracticeMode mode, String title) {
+  Widget _buildModeTab(PracticeMode mode, String title, bool isMobile) {
     final isSelected = _practiceMode == mode;
     return GestureDetector(
       onTap: () {
@@ -502,15 +596,15 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
       },
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 180),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        padding: EdgeInsets.symmetric(horizontal: isMobile ? 6 : 10, vertical: isMobile ? 4 : 6),
         decoration: BoxDecoration(
           color: isSelected ? const Color(0xFF6366F1) : Colors.transparent,
-          borderRadius: BorderRadius.circular(8),
+          borderRadius: BorderRadius.circular(6),
         ),
         child: Text(
           title,
           style: TextStyle(
-            fontSize: 11,
+            fontSize: isMobile ? 10 : 11,
             fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
             color: isSelected ? Colors.white : Colors.white60,
           ),
@@ -519,11 +613,11 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
     );
   }
 
-  Widget _buildTargetNotePrompt(SongNote targetNote) {
+  Widget _buildTargetNotePrompt(SongNote targetNote, bool isMobile) {
     final stringColor = Color(targetNote.string.colorHex);
     return Container(
-      margin: const EdgeInsets.fromLTRB(16, 10, 16, 2),
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      margin: EdgeInsets.symmetric(horizontal: isMobile ? 12 : 16, vertical: 2),
+      padding: EdgeInsets.symmetric(horizontal: isMobile ? 12 : 16, vertical: isMobile ? 6 : 8),
       decoration: BoxDecoration(
         color: const Color(0xFF181B26),
         borderRadius: BorderRadius.circular(14),
@@ -535,7 +629,7 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
           Row(
             children: [
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 decoration: BoxDecoration(
                   color: stringColor,
                   borderRadius: BorderRadius.circular(8),
@@ -544,32 +638,34 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
                   targetNote.noteName,
                   style: const TextStyle(
                     fontWeight: FontWeight.w900,
-                    fontSize: 15,
+                    fontSize: 14,
                     color: Colors.white,
                   ),
                 ),
               ),
-              const SizedBox(width: 12),
+              const SizedBox(width: 10),
               Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
                     'Струна ${targetNote.string.name} • ${targetNote.finger.label}',
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontWeight: FontWeight.bold,
-                      fontSize: 13,
+                      fontSize: isMobile ? 12 : 13,
                       color: Colors.white,
                     ),
                   ),
                   Text(
                     'Нота ${_currentNoteIndex + 1} из ${_currentSong.notes.length}',
-                    style: const TextStyle(fontSize: 11, color: Colors.white38),
+                    style: const TextStyle(fontSize: 10, color: Colors.white38),
                   ),
                 ],
               ),
             ],
           ),
           IconButton(
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(),
             onPressed: () {
               final hz = MusicTheory.midiToHz(targetNote.midiNote);
               widget.audioEngine.pushSynthNote(hz, 0.6);
@@ -582,9 +678,9 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
     );
   }
 
-  Widget _buildPlaybackControls(SongNote? targetNote) {
+  Widget _buildPlaybackControls(SongNote? targetNote, bool isMobile) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      padding: EdgeInsets.symmetric(horizontal: isMobile ? 12 : 16, vertical: isMobile ? 8 : 10),
       decoration: const BoxDecoration(
         color: Color(0xFF141722),
         border: Border(top: BorderSide(color: Colors.white10)),
@@ -592,36 +688,36 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          // Reset Button
           IconButton(
             onPressed: _resetPractice,
-            icon: const Icon(Icons.replay, color: Colors.white60),
+            icon: const Icon(Icons.replay, color: Colors.white60, size: 20),
             tooltip: 'Начать сначала',
           ),
-
-          // Play / Pause Button
           ElevatedButton.icon(
             onPressed: _isPlaying ? _pausePlayback : _startPlayback,
-            icon: Icon(_isPlaying ? Icons.pause : Icons.play_arrow),
-            label: Text(_isPlaying ? 'Пауза' : (_practiceMode == PracticeMode.waitNote ? 'Начать тренировку' : 'Воспроизведение')),
+            icon: Icon(_isPlaying ? Icons.pause : Icons.play_arrow, size: 18),
+            label: Text(
+              _isPlaying ? 'Пауза' : (_practiceMode == PracticeMode.waitNote ? 'Тренировка' : 'Старт'),
+              style: const TextStyle(fontSize: 13),
+            ),
             style: ElevatedButton.styleFrom(
               backgroundColor: const Color(0xFF6366F1),
               foregroundColor: Colors.white,
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+              padding: EdgeInsets.symmetric(horizontal: isMobile ? 16 : 22, vertical: isMobile ? 8 : 12),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
             ),
           ),
-
-          // Quick advance if user is stuck
           TextButton(
             onPressed: () {
               if (_currentNoteIndex < _currentSong.notes.length - 1) {
                 setState(() {
                   _currentNoteIndex++;
+                  _isSoundError = false;
+                  _soundErrorMessage = '';
                 });
               }
             },
-            child: const Text('Пропуск >', style: TextStyle(color: Colors.white38, fontSize: 12)),
+            child: const Text('Пропуск >', style: TextStyle(color: Colors.white38, fontSize: 11)),
           ),
         ],
       ),

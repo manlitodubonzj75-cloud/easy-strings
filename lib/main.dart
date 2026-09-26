@@ -51,6 +51,7 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
   ViolinString? _selectedTunerString;
   double _concertA4Hz = 440.0;
   bool _isMicActive = false;
+  bool _isMobileMode = false;
   String _statusMessage = 'Инициализация DSP движка...';
 
   DetectedNoteInfo? _currentNote;
@@ -144,7 +145,11 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    final mediaQuery = MediaQuery.of(context);
+    final autoMobile = mediaQuery.size.width < 500;
+    final effectiveMobile = _isMobileMode || autoMobile;
+
+    final appContent = Scaffold(
       appBar: AppBar(
         backgroundColor: const Color(0xFF141722),
         elevation: 0,
@@ -156,9 +161,9 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
                 color: const Color(0xFF6366F1).withValues(alpha: 0.2),
                 borderRadius: BorderRadius.circular(10),
               ),
-              child: const Icon(Icons.music_note, color: Color(0xFF6366F1), size: 20),
+              child: const Icon(Icons.music_note, color: Color(0xFF6366F1), size: 18),
             ),
-            const SizedBox(width: 12),
+            const SizedBox(width: 10),
             Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -166,22 +171,36 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
                   'Easy Violin',
                   style: TextStyle(
                     fontWeight: FontWeight.w900,
-                    fontSize: 17,
+                    fontSize: 16,
                     letterSpacing: -0.5,
                   ),
                 ),
                 Text(
                   _statusMessage,
-                  style: const TextStyle(fontSize: 10, color: Colors.white38),
+                  style: const TextStyle(fontSize: 9, color: Colors.white38),
                 ),
               ],
             ),
           ],
         ),
         actions: [
+          // Mobile Mode Switcher Toggle
+          IconButton(
+            onPressed: () {
+              setState(() {
+                _isMobileMode = !_isMobileMode;
+              });
+            },
+            icon: Icon(
+              effectiveMobile ? Icons.phone_android : Icons.desktop_mac,
+              color: effectiveMobile ? const Color(0xFF6366F1) : Colors.white60,
+              size: 20,
+            ),
+            tooltip: effectiveMobile ? 'Включить десктопный вид' : 'Включить мобильный вид',
+          ),
           Center(
             child: Padding(
-              padding: const EdgeInsets.only(right: 16),
+              padding: const EdgeInsets.only(right: 14),
               child: Row(
                 children: [
                   Container(
@@ -192,10 +211,10 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
                       color: _isMicActive ? const Color(0xFF10B981) : Colors.amber,
                     ),
                   ),
-                  const SizedBox(width: 6),
+                  const SizedBox(width: 5),
                   Text(
-                    _isMicActive ? 'DSP Active' : 'Idle',
-                    style: const TextStyle(fontSize: 12, color: Colors.white54),
+                    _isMicActive ? 'DSP' : 'Idle',
+                    style: const TextStyle(fontSize: 11, color: Colors.white54),
                   ),
                 ],
               ),
@@ -215,6 +234,7 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
                   currentNote: _currentNote,
                   selectedString: _selectedTunerString,
                   concertA4Hz: _concertA4Hz,
+                  isMobileMode: effectiveMobile,
                   onConcertPitchChanged: (pitch) {
                     setState(() {
                       _concertA4Hz = pitch;
@@ -229,6 +249,7 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
                 SongPracticeScreen(
                   audioEngine: _audioEngine,
                   currentNote: _currentNote,
+                  isMobileMode: effectiveMobile,
                 ),
                 FingerboardScreen(
                   audioEngine: _audioEngine,
@@ -246,6 +267,7 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
           SynthTestPanel(
             audioEngine: _audioEngine,
             isMicActive: _isMicActive,
+            isMobileMode: effectiveMobile,
             onMicToggle: _toggleMic,
           ),
         ],
@@ -266,8 +288,8 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
           elevation: 0,
           selectedItemColor: const Color(0xFF6366F1),
           unselectedItemColor: Colors.white38,
-          selectedFontSize: 12,
-          unselectedFontSize: 12,
+          selectedFontSize: 11,
+          unselectedFontSize: 11,
           type: BottomNavigationBarType.fixed,
           items: const [
             BottomNavigationBarItem(
@@ -290,5 +312,35 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
         ),
       ),
     );
+
+    // If mobile preview requested on wide display, frame it like a mobile device
+    if (_isMobileMode && mediaQuery.size.width > 550) {
+      return Container(
+        color: const Color(0xFF07090E),
+        child: Center(
+          child: Container(
+            width: 410,
+            height: 840,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(32),
+              border: Border.all(color: Colors.white24, width: 2),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.6),
+                  blurRadius: 30,
+                  spreadRadius: 8,
+                ),
+              ],
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(30),
+              child: appContent,
+            ),
+          ),
+        ),
+      );
+    }
+
+    return appContent;
   }
 }
