@@ -82,11 +82,12 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
   void _onPitchResult(PitchResult result) {
     final now = DateTime.now();
     // Filter faint phantom sounds, background noise & room hum
-    if (result.frequencyHz <= 0 || result.confidence < 0.60 || result.rmsEnergy < 8) {
+    if (result.frequencyHz <= 0 || result.confidence < 0.40) {
       if (now.difference(_lastNoteTime).inMilliseconds > 250) {
         if (_currentNote != null) {
           setState(() {
             _currentNote = null;
+            _smoothedHz = 0.0;
           });
         }
       }

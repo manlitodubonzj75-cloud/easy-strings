@@ -109,12 +109,25 @@ int32_t violin_processor_is_mic_active(void* handle)
  * Push synthetic tone (fundamental + 2nd and 3rd harmonics) for testing.
  */
 VIOLIN_EXPORT
+void violin_play_tone(float frequency_hz, float duration_sec)
+{
+    violin::playAudioTone(frequency_hz, duration_sec);
+}
+
+VIOLIN_EXPORT
 void violin_processor_push_synth_note(
     void* handle,
     float frequency_hz,
     float duration_sec)
 {
-    if (handle == nullptr || frequency_hz <= 0.0f || duration_sec <= 0.0f) {
+    if (frequency_hz <= 0.0f || duration_sec <= 0.0f) {
+        return;
+    }
+
+    // Output sound to Mac speaker / headphones
+    violin::playAudioTone(frequency_hz, duration_sec);
+
+    if (handle == nullptr) {
         return;
     }
 

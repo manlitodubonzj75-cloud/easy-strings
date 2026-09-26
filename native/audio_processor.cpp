@@ -44,6 +44,125 @@ static void appleAudioQueueCallback(
     AudioQueueEnqueueBuffer(queue, buffer, 0, nullptr);
 }
 
+#if defined(__APPLE__)
+class AppleAudioPlayer {
+public:
+    static AppleAudioPlayer& instance() {
+        static AppleAudioPlayer s_instance;
+        return s_instance;
+    }
+
+    AppleAudioPlayer() {
+        AudioStreamBasicDescription format{};
+        format.mSampleRate = 44100.0f;
+        format.mFormatID = kAudioFormatLinearPCM;
+        format.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
+        format.mBytesPerPacket = sizeof(float);
+        format.mFramesPerPacket = 1;
+        format.mBytesPerFrame = sizeof(float);
+        format.mChannelsPerFrame = 1;
+        format.mBitsPerChannel = 32;
+
+        OSStatus st = AudioQueueNewOutput(
+            &format,
+            audioOutputCallback,
+            this,
+            nullptr,
+            nullptr,
+            0,
+            &queue_);
+
+        if (st == noErr && queue_) {
+            const UInt32 bufSize = kBufferSampleCount * sizeof(float);
+            for (int i = 0; i < kNumBuffers; ++i) {
+                st = AudioQueueAllocateBuffer(queue_, bufSize, &buffers_[i]);
+                if (st == noErr && buffers_[i]) {
+                    std::memset(buffers_[i]->mAudioData, 0, bufSize);
+                    buffers_[i]->mAudioDataByteSize = bufSize;
+                    AudioQueueEnqueueBuffer(queue_, buffers_[i], 0, nullptr);
+                }
+            }
+            AudioQueueStart(queue_, nullptr);
+        }
+    }
+
+    ~AppleAudioPlayer() {
+        if (queue_) {
+            AudioQueueStop(queue_, true);
+            AudioQueueDispose(queue_, true);
+            queue_ = nullptr;
+        }
+    }
+
+    void play(float freq_hz, float duration_sec) {
+        if (freq_hz <= 0.0f || duration_sec <= 0.0f) {
+            duration_left_.store(0.0f, std::memory_order_relaxed);
+            return;
+        }
+        target_freq_.store(freq_hz, std::memory_order_relaxed);
+        duration_left_.store(duration_sec, std::memory_order_release);
+    }
+
+    void fillBuffer(AudioQueueBufferRef buffer) {
+        float* out = static_cast<float*>(buffer->mAudioData);
+        const UInt32 count = buffer->mAudioDataBytesCapacity / sizeof(float);
+        const float freq = target_freq_.load(std::memory_order_relaxed);
+        float left = duration_left_.load(std::memory_order_acquire);
+
+        if (freq <= 0.0f || left <= 0.0f) {
+            std::memset(out, 0, buffer->mAudioDataBytesCapacity);
+            buffer->mAudioDataByteSize = buffer->mAudioDataBytesCapacity;
+            if (queue_) AudioQueueEnqueueBuffer(queue_, buffer, 0, nullptr);
+            return;
+        }
+
+        constexpr float kSampleRate = 44100.0f;
+        constexpr float kTwoPi = 6.28318530717958647692f;
+        const float phase_step = kTwoPi * freq / kSampleRate;
+        const float dt = 1.0f / kSampleRate;
+
+        for (UInt32 i = 0; i < count; ++i) {
+            if (left <= 0.0f) {
+                out[i] = 0.0f;
+                continue;
+            }
+            // Rich violin tone with warm harmonics and smooth decay envelope
+            const float env = std::min(1.0f, left * 25.0f) * 0.40f;
+            out[i] = env * (0.65f * std::sin(phase_) + 0.25f * std::sin(2.0f * phase_) + 0.10f * std::sin(3.0f * phase_));
+            phase_ += phase_step;
+            if (phase_ >= kTwoPi) phase_ -= kTwoPi;
+            left -= dt;
+        }
+
+        duration_left_.store(std::max(0.0f, left), std::memory_order_release);
+        buffer->mAudioDataByteSize = buffer->mAudioDataBytesCapacity;
+        if (queue_) AudioQueueEnqueueBuffer(queue_, buffer, 0, nullptr);
+    }
+
+private:
+    static void audioOutputCallback(void* userData, AudioQueueRef, AudioQueueBufferRef buffer) {
+        auto* player = static_cast<AppleAudioPlayer*>(userData);
+        if (player) {
+            player->fillBuffer(buffer);
+        }
+    }
+
+    AudioQueueRef queue_{nullptr};
+    static constexpr int kNumBuffers = 3;
+    static constexpr UInt32 kBufferSampleCount = 1024;
+    AudioQueueBufferRef buffers_[kNumBuffers]{};
+    std::atomic<float> target_freq_{0.0f};
+    std::atomic<float> duration_left_{0.0f};
+    float phase_{0.0f};
+};
+
+void playAudioTone(float freq_hz, float duration_sec) noexcept {
+    AppleAudioPlayer::instance().play(freq_hz, duration_sec);
+}
+#else
+void playAudioTone(float /*freq_hz*/, float /*duration_sec*/) noexcept {}
+#endif
+
 } // namespace violin
 #endif
 
@@ -59,7 +178,7 @@ constexpr float kTwoPi = 2.0f * kPi;
 constexpr float kMinPitchHz = 160.0f;
 constexpr float kMaxPitchHz = 2200.0f;
 
-constexpr float kMPMThreshold = 0.70f;
+constexpr float kMPMThreshold = 0.50f;
 
 constexpr float kScratchFlatnessThreshold = 0.28f;
 constexpr float kScratchHnrThresholdDb = 6.0f;
@@ -371,14 +490,8 @@ float ViolinTracker::calculateMPM(
         }
     }
 
-    struct CandidatePeak {
-        float lag;
-        float nsdf;
-        float pitch;
-    };
-    std::vector<CandidatePeak> peaks;
-    peaks.reserve(16);
-    float max_nsdf = -1.0f;
+    float best_pitch = 0.0f;
+    float best_nsdf = -1.0f;
 
     // Find local maxima over threshold
     for (std::size_t lag = min_lag + 1; lag + 1 <= max_lag; ++lag) {
@@ -412,29 +525,18 @@ float ViolinTracker::calculateMPM(
             continue;
         }
 
-        peaks.push_back({refined_lag, current, candidate_pitch});
-        if (current > max_nsdf) {
-            max_nsdf = current;
+        if (current > best_nsdf) {
+            best_nsdf = current;
+            best_pitch = candidate_pitch;
         }
     }
 
-    if (peaks.empty() || max_nsdf <= 0.0f) {
+    if (best_pitch <= 0.0f) {
         return 0.0f;
     }
 
-    // McLeod Pitch Method Key Maximum:
-    // Pick the FIRST peak that reaches 0.85 of maximum NSDF to prevent octave jumping
-    // on open strings (which often have strong 2nd harmonics).
-    const float cutoff = 0.85f * max_nsdf;
-    for (const auto& p : peaks) {
-        if (p.nsdf >= cutoff) {
-            confidence = std::clamp(p.nsdf, 0.0f, 1.0f);
-            return p.pitch;
-        }
-    }
-
-    confidence = std::clamp(max_nsdf, 0.0f, 1.0f);
-    return peaks.front().pitch;
+    confidence = std::clamp(best_nsdf, 0.0f, 1.0f);
+    return best_pitch;
 }
 
 float ViolinTracker::calculateSpectralFlatness(
@@ -598,18 +700,32 @@ PitchResult ViolinTracker::processFrame(
     const float rms = static_cast<float>(std::sqrt(sum_sq / static_cast<double>(frame.size())));
     result.rms_energy = static_cast<std::uint8_t>(std::clamp(rms * 1000.0f, 0.0f, 255.0f));
 
+    // Zero out immediately on silence or ambient noise floor (< 3.0 mV)
+    // This strictly eliminates phantom sounds.
+    if (rms < 0.0015f) {
+        last_stable_pitch_ = 0.0f;
+        min_rms_transition_ = 0.0f;
+        result.frequency_hz = 0.0f;
+        result.confidence = 0.0f;
+        result.is_scratching = 0;
+        return result;
+    }
+
     float confidence = 0.0f;
     const float pitch = calculateMPM(frame, confidence);
 
-    result.frequency_hz = pitch;
-    result.confidence = confidence;
-
-    if (pitch <= 0.0f || confidence < 0.60f || rms < 0.009f) {
+    // If pitch cannot be reliably determined: return zeroed result
+    if (pitch <= 0.0f || confidence < 0.40f) {
         last_stable_pitch_ = 0.0f;
         min_rms_transition_ = 0.0f;
+        result.frequency_hz = 0.0f;
+        result.confidence = 0.0f;
         result.is_scratching = (rms > 0.015f) ? 1 : 0;
         return result;
     }
+
+    result.frequency_hz = pitch;
+    result.confidence = confidence;
 
     // 2. Legato (Slur) Transition Detection:
     // Continuous tone without bow reversal/silence dip

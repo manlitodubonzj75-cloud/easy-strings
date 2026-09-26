@@ -185,7 +185,7 @@ class MusicTheory {
     double concertA4Hz = 440.0,
     double inTuneToleranceCents = 10.0,
   }) {
-    if (hz < 150.0 || hz > 2500.0 || confidence < 0.55) {
+    if (hz < 150.0 || hz > 2500.0 || confidence < 0.40) {
       return null;
     }
 

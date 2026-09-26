@@ -121,4 +121,6 @@ private:
     static constexpr float kScratchHnrThresholdDb = 6.0f;
 };
 
+
+void playAudioTone(float freq_hz, float duration_sec) noexcept;
 } // namespace violin
