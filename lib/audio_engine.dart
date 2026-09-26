@@ -155,6 +155,9 @@ class AudioEngine {
 
   StreamController<PitchResult>? _controller;
   Stream<PitchResult>? _results;
+  PitchResult? _lastPitchResult;
+
+  PitchResult? get lastPitchResult => _lastPitchResult;
 
   bool get isRunning => _workerIsolate != null;
 
@@ -194,6 +197,7 @@ class AudioEngine {
 
     resultPort.listen((dynamic message) {
       if (message is PitchResult) {
+        _lastPitchResult = message;
         controller.add(message);
       }
     });
@@ -248,6 +252,10 @@ class AudioEngine {
     final fn = _pushSynthNote;
     if (handle == null || fn == null) return;
     fn(handle, frequencyHz, durationSec);
+  }
+
+  void playSyntheticNote(double frequencyHz, [double durationSec = 1.0]) {
+    pushSynthNote(frequencyHz, durationSec);
   }
 
   int pushSamples(

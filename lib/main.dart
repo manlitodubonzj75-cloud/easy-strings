@@ -1,12 +1,13 @@
+import 'dart:math' as math;
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'audio_engine.dart';
 import 'music_theory.dart';
-import 'ui/fingerboard_screen.dart';
+import 'theme/apple_violin_theme.dart';
 import 'ui/song_practice_screen.dart';
 import 'ui/synth_test_panel.dart';
-import 'ui/tuner_screen.dart';
 import 'ui/trainer_screen.dart';
+import 'ui/tuner_screen.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -19,17 +20,17 @@ class EasyViolinApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Easy Violin',
+      title: 'Simply Violin',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
-        scaffoldBackgroundColor: const Color(0xFF0D0F17),
+        scaffoldBackgroundColor: AppleViolinTheme.darkBg,
         colorScheme: const ColorScheme.dark(
-          primary: Color(0xFF6366F1),
-          secondary: Color(0xFF10B981),
-          surface: Color(0xFF181B26),
+          primary: AppleViolinTheme.appleBlue,
+          secondary: AppleViolinTheme.appleGreen,
+          surface: AppleViolinTheme.cardDark,
         ),
-        fontFamily: 'sans-serif',
+        fontFamily: '-apple-system',
       ),
       home: const MainViolinScreen(),
     );
@@ -51,8 +52,8 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
   ViolinString? _selectedTunerString;
   double _concertA4Hz = 440.0;
   bool _isMicActive = false;
-  bool _isMobileMode = false;
-  String _statusMessage = 'Инициализация DSP движка...';
+  final bool _isMobileFrame = false;
+  final bool _showDebugSynth = false;
 
   DetectedNoteInfo? _currentNote;
   double _smoothedHz = 0.0;
@@ -72,21 +73,17 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
       final micStarted = _audioEngine.startMic();
       setState(() {
         _isMicActive = micStarted;
-        _statusMessage = micStarted
-            ? 'Микрофон активен (44.1 kHz, CoreAudio)'
-            : 'DSP движок готов (микрофон ожидает разрешения)';
       });
-    } catch (e) {
-      setState(() {
-        _statusMessage = 'Ошибка: $e';
-      });
+    } catch (_) {
+      // Audio engine error
     }
   }
 
   void _onPitchResult(PitchResult result) {
     final now = DateTime.now();
-    if (result.frequencyHz <= 0 || result.confidence < 0.45) {
-      if (now.difference(_lastNoteTime).inMilliseconds > 400) {
+    // Filter faint phantom sounds, background noise & room hum
+    if (result.frequencyHz <= 0 || result.confidence < 0.60 || result.rmsEnergy < 8) {
+      if (now.difference(_lastNoteTime).inMilliseconds > 250) {
         if (_currentNote != null) {
           setState(() {
             _currentNote = null;
@@ -98,18 +95,18 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
 
     _lastNoteTime = now;
 
-    // Exponential moving average filter for subtle pitch stabilization
+    // Moving average filter for pitch stabilization
     if (_smoothedHz == 0.0 || (result.frequencyHz - _smoothedHz).abs() > 40.0) {
       _smoothedHz = result.frequencyHz;
     } else {
-      _smoothedHz = _smoothedHz * 0.4 + result.frequencyHz * 0.6;
+      _smoothedHz = _smoothedHz * 0.35 + result.frequencyHz * 0.65;
     }
 
     final note = MusicTheory.analyzePitch(
       _smoothedHz,
       result.confidence,
       result.isScratching,
-      targetString: _selectedTunerString,
+      targetString: _selectedTabIndex == 0 ? _selectedTunerString : null,
       concertA4Hz: _concertA4Hz,
     );
 
@@ -125,13 +122,11 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
       final ok = _audioEngine.startMic();
       setState(() {
         _isMicActive = ok;
-        _statusMessage = ok ? 'Микрофон включен' : 'Не удалось включить микрофон';
       });
     } else {
       _audioEngine.stopMic();
       setState(() {
         _isMicActive = false;
-        _statusMessage = 'Микрофон отключен';
       });
     }
   }
@@ -146,201 +141,161 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
   @override
   Widget build(BuildContext context) {
     final mediaQuery = MediaQuery.of(context);
-    final autoMobile = mediaQuery.size.width < 500;
-    final effectiveMobile = _isMobileMode || autoMobile;
-
-    final appContent = Scaffold(
-      appBar: AppBar(
-        backgroundColor: const Color(0xFF141722),
-        elevation: 0,
-        title: Row(
+    final isDesktop = mediaQuery.size.width >= 560;
+    
+    Widget coreApp = Scaffold(
+      backgroundColor: AppleViolinTheme.darkBg,
+      body: SafeArea(
+        bottom: false,
+        child: Column(
           children: [
-            Container(
-              padding: const EdgeInsets.all(6),
-              decoration: BoxDecoration(
-                color: const Color(0xFF6366F1).withValues(alpha: 0.2),
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: const Icon(Icons.music_note, color: Color(0xFF6366F1), size: 18),
-            ),
-            const SizedBox(width: 10),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Easy Violin',
-                  style: TextStyle(
-                    fontWeight: FontWeight.w900,
-                    fontSize: 16,
-                    letterSpacing: -0.5,
-                  ),
-                ),
-                Text(
-                  _statusMessage,
-                  style: const TextStyle(fontSize: 9, color: Colors.white38),
-                ),
-              ],
-            ),
-          ],
-        ),
-        actions: [
-          // Mobile Mode Switcher Toggle
-          IconButton(
-            onPressed: () {
-              setState(() {
-                _isMobileMode = !_isMobileMode;
-              });
-            },
-            icon: Icon(
-              effectiveMobile ? Icons.phone_android : Icons.desktop_mac,
-              color: effectiveMobile ? const Color(0xFF6366F1) : Colors.white60,
-              size: 20,
-            ),
-            tooltip: effectiveMobile ? 'Включить десктопный вид' : 'Включить мобильный вид',
-          ),
-          Center(
-            child: Padding(
-              padding: const EdgeInsets.only(right: 14),
-              child: Row(
+            const SizedBox(height: 12),
+            // Main Body by Tab
+            Expanded(
+              child: IndexedStack(
+                index: _selectedTabIndex,
                 children: [
-                  Container(
-                    width: 8,
-                    height: 8,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: _isMicActive ? const Color(0xFF10B981) : Colors.amber,
-                    ),
+                  TunerScreen(
+                    audioEngine: _audioEngine,
+                    currentNote: _currentNote,
+                    selectedString: _selectedTunerString,
+                    concertA4Hz: _concertA4Hz,
+                    isMobileMode: true,
+                    onConcertPitchChanged: (pitch) {
+                      setState(() {
+                        _concertA4Hz = pitch;
+                      });
+                    },
+                    onStringSelected: (str) {
+                      setState(() {
+                        _selectedTunerString = str;
+                      });
+                    },
                   ),
-                  const SizedBox(width: 5),
-                  Text(
-                    _isMicActive ? 'DSP' : 'Idle',
-                    style: const TextStyle(fontSize: 11, color: Colors.white54),
+                  TrainerScreen(
+                    audioEngine: _audioEngine,
+                    currentNote: _currentNote,
+                  ),
+                  SongPracticeScreen(
+                    audioEngine: _audioEngine,
+                    currentNote: _currentNote,
+                    isMobileMode: true,
                   ),
                 ],
               ),
             ),
-          ),
-        ],
-      ),
-      body: Column(
-        children: [
-          // Main Body Screen by Tab
-          Expanded(
-            child: IndexedStack(
-              index: _selectedTabIndex,
-              children: [
-                TunerScreen(
-                  audioEngine: _audioEngine,
-                  currentNote: _currentNote,
-                  selectedString: _selectedTunerString,
-                  concertA4Hz: _concertA4Hz,
-                  isMobileMode: effectiveMobile,
-                  onConcertPitchChanged: (pitch) {
-                    setState(() {
-                      _concertA4Hz = pitch;
-                    });
-                  },
-                  onStringSelected: (str) {
-                    setState(() {
-                      _selectedTunerString = str;
-                    });
-                  },
-                ),
-                SongPracticeScreen(
-                  audioEngine: _audioEngine,
-                  currentNote: _currentNote,
-                  isMobileMode: effectiveMobile,
-                ),
-                FingerboardScreen(
-                  audioEngine: _audioEngine,
-                  currentNote: _currentNote,
-                ),
-                TrainerScreen(
-                  audioEngine: _audioEngine,
-                  currentNote: _currentNote,
-                ),
-              ],
-            ),
-          ),
 
-          // Bottom Test Synth / Mic Control Panel
-          SynthTestPanel(
-            audioEngine: _audioEngine,
-            isMicActive: _isMicActive,
-            isMobileMode: effectiveMobile,
-            onMicToggle: _toggleMic,
-          ),
-        ],
-      ),
-      bottomNavigationBar: Container(
-        decoration: const BoxDecoration(
-          color: Color(0xFF141722),
-          border: Border(top: BorderSide(color: Colors.white10)),
-        ),
-        child: BottomNavigationBar(
-          currentIndex: _selectedTabIndex,
-          onTap: (index) {
-            setState(() {
-              _selectedTabIndex = index;
-            });
-          },
-          backgroundColor: Colors.transparent,
-          elevation: 0,
-          selectedItemColor: const Color(0xFF6366F1),
-          unselectedItemColor: Colors.white38,
-          selectedFontSize: 11,
-          unselectedFontSize: 11,
-          type: BottomNavigationBarType.fixed,
-          items: const [
-            BottomNavigationBarItem(
-              icon: Icon(Icons.tune),
-              label: 'Тюнер',
-            ),
-            BottomNavigationBarItem(
-              icon: Icon(Icons.library_music_rounded),
-              label: 'Пьесы',
-            ),
-            BottomNavigationBarItem(
-              icon: Icon(Icons.line_weight_sharp),
-              label: 'Гриф',
-            ),
-            BottomNavigationBarItem(
-              icon: Icon(Icons.school_rounded),
-              label: 'Уроки',
-            ),
+            // Collapsible Debug Synth Panel (if toggled)
+            if (_showDebugSynth)
+              SynthTestPanel(
+                audioEngine: _audioEngine,
+                isMicActive: _isMicActive,
+                isMobileMode: true,
+                onMicToggle: _toggleMic,
+              ),
+
+            // Apple HIG Bottom Navigation Bar & Home Bar Indicator
+            _buildAppleTabBar(),
           ],
         ),
       ),
     );
 
-    // If mobile preview requested on wide display, frame it like a mobile device
-    if (_isMobileMode && mediaQuery.size.width > 550) {
-      return Container(
-        color: const Color(0xFF07090E),
-        child: Center(
+    if (isDesktop && !_isMobileFrame) {
+      // Center in a realistic iPhone chassis frame on desktop screens
+      return Scaffold(
+        backgroundColor: const Color(0xFF0C0C0E),
+        body: Center(
           child: Container(
-            width: 410,
-            height: 840,
+            width: 420,
+            height: math.min(mediaQuery.size.height, 880.0),
+            clipBehavior: Clip.antiAlias,
             decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(32),
-              border: Border.all(color: Colors.white24, width: 2),
-              boxShadow: [
+              color: AppleViolinTheme.darkBg,
+              borderRadius: BorderRadius.circular(48),
+              border: Border.all(color: const Color(0xFF2C2C2E), width: 3),
+              boxShadow: const [
                 BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.6),
-                  blurRadius: 30,
+                  color: Colors.black87,
+                  blurRadius: 40,
                   spreadRadius: 8,
                 ),
               ],
             ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(30),
-              child: appContent,
-            ),
+            child: coreApp,
           ),
         ),
       );
     }
 
-    return appContent;
+    return coreApp;
+  }
+
+  Widget _buildAppleTabBar() {
+    return Container(
+      decoration: const BoxDecoration(
+        color: Color(0xE6161618),
+        border: Border(top: BorderSide(color: Color(0x1AFFFFFF))),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 8, bottom: 4),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceAround,
+              children: [
+                _buildTabItem(0, Icons.adjust_rounded, 'Тюнер'),
+                _buildTabItem(1, Icons.grid_view_rounded, 'Тренировка'),
+                _buildTabItem(2, Icons.music_note_rounded, 'Пьесы'),
+              ],
+            ),
+          ),
+          // iOS Home Bar Indicator
+          Padding(
+            padding: const EdgeInsets.only(top: 2, bottom: 6),
+            child: Container(
+              width: 134,
+              height: 4.5,
+              decoration: BoxDecoration(
+                color: Colors.white24,
+                borderRadius: BorderRadius.circular(3),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTabItem(int index, IconData icon, String label) {
+    final isSelected = _selectedTabIndex == index;
+    return GestureDetector(
+      onTap: () {
+        setState(() {
+          _selectedTabIndex = index;
+        });
+      },
+      behavior: HitTestBehavior.opaque,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            icon,
+            size: 24,
+            color: isSelected ? AppleViolinTheme.appleBlue : AppleViolinTheme.subtext,
+          ),
+          const SizedBox(height: 2),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.w600,
+              color: isSelected ? AppleViolinTheme.appleBlue : AppleViolinTheme.subtext,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }

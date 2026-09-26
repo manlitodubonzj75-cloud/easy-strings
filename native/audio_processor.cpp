@@ -335,9 +335,6 @@ float ViolinTracker::calculateMPM(
 {
     confidence = 0.0f;
 
-    float best_pitch = 0.0f;
-    float best_nsdf = -1.0f;
-
     const std::size_t min_lag =
         static_cast<std::size_t>(
             std::floor(sample_rate_ / kMaxPitchHz));
@@ -374,6 +371,15 @@ float ViolinTracker::calculateMPM(
         }
     }
 
+    struct CandidatePeak {
+        float lag;
+        float nsdf;
+        float pitch;
+    };
+    std::vector<CandidatePeak> peaks;
+    peaks.reserve(16);
+    float max_nsdf = -1.0f;
+
     // Find local maxima over threshold
     for (std::size_t lag = min_lag + 1; lag + 1 <= max_lag; ++lag) {
         const float prev = nsdf[lag - 1];
@@ -406,18 +412,29 @@ float ViolinTracker::calculateMPM(
             continue;
         }
 
-        if (current > best_nsdf) {
-            best_nsdf = current;
-            best_pitch = candidate_pitch;
+        peaks.push_back({refined_lag, current, candidate_pitch});
+        if (current > max_nsdf) {
+            max_nsdf = current;
         }
     }
 
-    if (best_pitch <= 0.0f) {
+    if (peaks.empty() || max_nsdf <= 0.0f) {
         return 0.0f;
     }
 
-    confidence = std::clamp(best_nsdf, 0.0f, 1.0f);
-    return best_pitch;
+    // McLeod Pitch Method Key Maximum:
+    // Pick the FIRST peak that reaches 0.85 of maximum NSDF to prevent octave jumping
+    // on open strings (which often have strong 2nd harmonics).
+    const float cutoff = 0.85f * max_nsdf;
+    for (const auto& p : peaks) {
+        if (p.nsdf >= cutoff) {
+            confidence = std::clamp(p.nsdf, 0.0f, 1.0f);
+            return p.pitch;
+        }
+    }
+
+    confidence = std::clamp(max_nsdf, 0.0f, 1.0f);
+    return peaks.front().pitch;
 }
 
 float ViolinTracker::calculateSpectralFlatness(
@@ -587,7 +604,7 @@ PitchResult ViolinTracker::processFrame(
     result.frequency_hz = pitch;
     result.confidence = confidence;
 
-    if (pitch <= 0.0f || confidence < 0.50f || rms < 0.003f) {
+    if (pitch <= 0.0f || confidence < 0.60f || rms < 0.009f) {
         last_stable_pitch_ = 0.0f;
         min_rms_transition_ = 0.0f;
         result.is_scratching = (rms > 0.015f) ? 1 : 0;

@@ -185,16 +185,30 @@ class MusicTheory {
     double concertA4Hz = 440.0,
     double inTuneToleranceCents = 10.0,
   }) {
-    if (hz < 150.0 || hz > 2500.0 || confidence < 0.40) {
+    if (hz < 150.0 || hz > 2500.0 || confidence < 0.55) {
       return null;
     }
 
-    final fractionalMidi = hzToMidi(hz, concertA4Hz: concertA4Hz);
-    final roundedMidi = fractionalMidi.round();
-    final targetHz = midiToHz(roundedMidi, concertA4Hz: concertA4Hz);
-    final cents = calculateCents(hz, targetHz).clamp(-50.0, 50.0);
+    final double targetHz;
+    final int roundedMidi;
+    final String noteName;
+    final double cents;
 
-    final noteName = midiToNoteName(roundedMidi);
+    if (targetString != null) {
+      // Locked on explicitly selected string! Always tune against this string's standard pitch.
+      targetHz = targetString.openHz(concertA4Hz);
+      roundedMidi = targetString.openMidi;
+      noteName = midiToNoteName(roundedMidi);
+      cents = calculateCents(hz, targetHz).clamp(-100.0, 100.0);
+    } else {
+      // Automatic chromatic note detection
+      final fractionalMidi = hzToMidi(hz, concertA4Hz: concertA4Hz);
+      roundedMidi = fractionalMidi.round();
+      targetHz = midiToHz(roundedMidi, concertA4Hz: concertA4Hz);
+      cents = calculateCents(hz, targetHz).clamp(-50.0, 50.0);
+      noteName = midiToNoteName(roundedMidi);
+    }
+
     final isInTune = cents.abs() <= inTuneToleranceCents;
 
     // Peg turning guidance
