@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:io';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import '../audio_engine.dart';
 import '../models/song_model.dart';
@@ -253,81 +253,46 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
   }
 
   Future<void> _pickCustomMidi() async {
-    final pathController = TextEditingController(text: '/Users/user/Downloads/');
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF181B26),
-        title: const Text('Загрузка MIDI-файла', style: TextStyle(color: Colors.white)),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Укажите путь к .mid файлу партии скрипки или распознанному скану нот:',
-              style: TextStyle(fontSize: 12, color: Colors.white70),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: pathController,
-              autofocus: true,
-              style: const TextStyle(color: Colors.white, fontSize: 13),
-              decoration: InputDecoration(
-                filled: true,
-                fillColor: const Color(0xFF242838),
-                hintText: '/path/to/violin_piece.mid',
-                hintStyle: const TextStyle(color: Colors.white38),
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Отмена', style: TextStyle(color: Colors.white54)),
+    try {
+      final files = await FilePicker.pickFiles(
+        dialogTitle: 'Выберите MIDI-файл партии скрипки',
+        type: FileType.custom,
+        allowedExtensions: ['mid', 'midi'],
+      );
+
+      if (files.isEmpty) {
+        return;
+      }
+
+      final pickedFile = files.first;
+      final bytes = await pickedFile.readAsBytes();
+      final fileName = pickedFile.name;
+      final loadedSong = MidiParser.parseMidiBytes(bytes, title: fileName);
+
+      setState(() {
+        _availableSongs = [loadedSong, ..._availableSongs];
+        _currentSong = loadedSong;
+        _resetPractice();
+      });
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            backgroundColor: const Color(0xFF10B981),
+            content: Text('Файл "$fileName" загружен (${loadedSong.notes.length} нот)'),
           ),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF6366F1)),
-            onPressed: () async {
-              final path = pathController.text.trim();
-              Navigator.pop(ctx);
-              try {
-                final file = File(path);
-                if (await file.exists()) {
-                  final bytes = await file.readAsBytes();
-                  final fileName = file.uri.pathSegments.last;
-                  final loadedSong = MidiParser.parseMidiBytes(bytes, title: fileName);
-                  setState(() {
-                    _availableSongs = [loadedSong, ..._availableSongs];
-                    _currentSong = loadedSong;
-                    _resetPractice();
-                  });
-                  if (mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text('Файл "$fileName" успешно загружен (${loadedSong.notes.length} нот)')),
-                    );
-                  }
-                } else {
-                  if (mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('Файл не найден. Проверьте путь.')),
-                    );
-                  }
-                }
-              } catch (e) {
-                if (mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('Ошибка парсинга MIDI: $e')),
-                  );
-                }
-              }
-            },
-            child: const Text('Загрузить'),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            backgroundColor: const Color(0xFFEF4444),
+            content: Text('Ошибка обработки MIDI: $e'),
           ),
-        ],
-      ),
-    );
+        );
+      }
+    }
   }
 
   void _showSongPicker() {
