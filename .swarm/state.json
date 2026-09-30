@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "last_updated": 1790738600.0751889,
+  "last_updated": 1790738891.5714262,
   "modules": {
     "main": {
       "path": "main.py",
@@ -8,7 +8,7 @@
       "dependencies": [],
       "role": "service",
       "worker_id": "free-worker-1",
-      "updated_at": 1790738600.075184
+      "updated_at": 1790738891.57142
     }
   },
   "routes": {},
@@ -16,11 +16,11 @@
   "env_vars": {},
   "contracts": [],
   "metrics": {
-    "total_tasks": 1,
+    "total_tasks": 2,
     "total_spent_rub": 0.0,
-    "total_prompt_tokens": 192,
-    "total_completion_tokens": 2002,
-    "free_tier_tasks": 1
+    "total_prompt_tokens": 330,
+    "total_completion_tokens": 2081,
+    "free_tier_tasks": 2
   },
   "history": [
     {
@@ -28,6 +28,14 @@
       "timestamp": 1790738396.2845912,
       "spent_rub": 0.0,
       "tokens": 2194,
+      "is_free": true,
+      "status": "success"
+    },
+    {
+      "task_id": "task_1790738597_38bfcb",
+      "timestamp": 1790738600.172556,
+      "spent_rub": 0.0,
+      "tokens": 217,
       "is_free": true,
       "status": "success"
     }
