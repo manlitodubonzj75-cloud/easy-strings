@@ -124,9 +124,6 @@ void violin_processor_push_synth_note(
         return;
     }
 
-    // Output sound to Mac speaker / headphones
-    violin::playAudioTone(frequency_hz, duration_sec);
-
     if (handle == nullptr) {
         return;
     }
@@ -146,7 +143,6 @@ void violin_processor_push_synth_note(
     while (emitted < total_samples) {
         const std::size_t count = std::min(kChunkSize, total_samples - emitted);
         for (std::size_t i = 0; i < count; ++i) {
-            // Rich violin-like harmonic structure: fundamental + 2nd harmonic (often strong on violin)
             float s = 0.70f * std::sin(phase) +
                       0.35f * std::sin(2.0f * phase) +
                       0.15f * std::sin(3.0f * phase);

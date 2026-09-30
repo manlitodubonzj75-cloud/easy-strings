@@ -76,7 +76,7 @@ class _TunerScreenState extends State<TunerScreen> {
             isScratching: isScratching,
             isInTune: isInTune,
             noteLabel: note != null
-                ? '${note.noteName} (${note.rawHz.toStringAsFixed(1)} Hz)'
+                ? '${note.solfegeName} (${note.rawHz.toStringAsFixed(1)} Hz)'
                 : 'Сыграйте звук смычком',
             height: isMobile ? 84 : 96,
             compact: isMobile,
@@ -104,7 +104,7 @@ class _TunerScreenState extends State<TunerScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: const [
             Text(
-              'SIMPLY TUNING',
+              'EASY VIOLIN',
               style: TextStyle(
                 fontSize: 11,
                 fontWeight: FontWeight.w700,
@@ -186,7 +186,42 @@ class _TunerScreenState extends State<TunerScreen> {
           ),
         ],
       );
-    } else if (isScratching) {
+    } else if (note.cents.abs() <= 5.0) {
+      bgColor = AppleViolinTheme.appleGreen.withValues(alpha: 0.15);
+      borderColor = AppleViolinTheme.appleGreen.withValues(alpha: 0.4);
+      shadows = const [AppleViolinTheme.greenGlow];
+      content = Row(
+        mainAxisSize: MainAxisSize.min,
+        children: const [
+          Icon(Icons.check_circle_rounded, color: AppleViolinTheme.appleGreen, size: 16),
+          SizedBox(width: 8),
+          Flexible(
+            child: Text(
+              'Идеальный строй струны! (±5¢)',
+              style: TextStyle(fontSize: 12, color: Colors.white, fontWeight: FontWeight.bold),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
+      );
+    } else if (note.cents.abs() <= 12.0) {
+      bgColor = AppleViolinTheme.appleGreen.withValues(alpha: 0.12);
+      borderColor = AppleViolinTheme.appleGreen.withValues(alpha: 0.3);
+      content = Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.check_circle_outline_rounded, color: AppleViolinTheme.appleGreen, size: 16),
+          const SizedBox(width: 8),
+          Flexible(
+            child: Text(
+              'В строю (${note.cents > 0 ? "+" : ""}${note.cents.toStringAsFixed(0)}¢)',
+              style: const TextStyle(fontSize: 12, color: Colors.white, fontWeight: FontWeight.w600),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
+      );
+    } else if (isScratching && note.cents.abs() > 20.0) {
       bgColor = AppleViolinTheme.appleRed.withValues(alpha: 0.15);
       borderColor = AppleViolinTheme.appleRed.withValues(alpha: 0.4);
       content = Row(
@@ -203,27 +238,9 @@ class _TunerScreenState extends State<TunerScreen> {
           ),
         ],
       );
-    } else if (isInTune) {
-      bgColor = AppleViolinTheme.appleGreen.withValues(alpha: 0.15);
-      borderColor = AppleViolinTheme.appleGreen.withValues(alpha: 0.4);
-      shadows = const [AppleViolinTheme.greenGlow];
-      content = Row(
-        mainAxisSize: MainAxisSize.min,
-        children: const [
-          Icon(Icons.check_circle_rounded, color: AppleViolinTheme.appleGreen, size: 16),
-          SizedBox(width: 8),
-          Flexible(
-            child: Text(
-              'Идеальный строй струны!',
-              style: TextStyle(fontSize: 12, color: Colors.white, fontWeight: FontWeight.bold),
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-        ],
-      );
     } else {
       final isFlat = note.cents < 0;
-      final pegHint = isFlat ? '<<< Натянуть колок' : 'Ослабить колок >>>';
+      final pegHint = isFlat ? '<<< Натянуть колок (низит)' : 'Ослабить колок (высит) >>>';
       content = Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -263,10 +280,10 @@ class _TunerScreenState extends State<TunerScreen> {
 
   Widget _buildStringSelector(bool isMobile) {
     const strings = [
-      (ViolinString.g, 'G', '196.0 Hz', 'IV'),
-      (ViolinString.d, 'D', '293.7 Hz', 'III'),
-      (ViolinString.a, 'A', '440.0 Hz', 'II'),
-      (ViolinString.e, 'E', '659.3 Hz', 'I'),
+      (ViolinString.g, 'Соль', '196.0 Hz', 'IV'),
+      (ViolinString.d, 'Ре', '293.7 Hz', 'III'),
+      (ViolinString.a, 'Ля', '440.0 Hz', 'II'),
+      (ViolinString.e, 'Ми', '659.3 Hz', 'I'),
     ];
 
     return Column(
@@ -327,7 +344,7 @@ class _TunerScreenState extends State<TunerScreen> {
                         Text(
                           name,
                           style: TextStyle(
-                            fontSize: 20,
+                            fontSize: name.length > 2 ? 17 : 20,
                             fontWeight: FontWeight.w800,
                             color: isSelected ? Colors.white : Colors.white70,
                           ),

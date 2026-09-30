@@ -1,0 +1,26 @@
+{
+  "version": "1.0.0",
+  "last_updated": 1790738396.146559,
+  "modules": {
+    "main": {
+      "path": "main.py",
+      "exports": [],
+      "dependencies": [],
+      "role": "service",
+      "worker_id": "free-worker-1",
+      "updated_at": 1790738396.146555
+    }
+  },
+  "routes": {},
+  "ports": {},
+  "env_vars": {},
+  "contracts": [],
+  "metrics": {
+    "total_tasks": 0,
+    "total_spent_rub": 0.0,
+    "total_prompt_tokens": 0,
+    "total_completion_tokens": 0,
+    "free_tier_tasks": 0
+  },
+  "history": []
+}

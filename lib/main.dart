@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 import 'dart:async';
+import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'audio_engine.dart';
 import 'music_theory.dart';
@@ -20,7 +21,7 @@ class EasyViolinApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Simply Violin',
+      title: 'easy violin',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
@@ -70,10 +71,16 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
       final stream = await _audioEngine.start();
       _pitchSub = stream.listen(_onPitchResult);
 
+      if (Platform.isAndroid) {
+        await AudioEngine.ensureRecordAudioPermission();
+      }
+
       final micStarted = _audioEngine.startMic();
-      setState(() {
-        _isMicActive = micStarted;
-      });
+      if (mounted) {
+        setState(() {
+          _isMicActive = micStarted;
+        });
+      }
     } catch (_) {
       // Audio engine error
     }
@@ -118,17 +125,32 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
     }
   }
 
-  void _toggleMic(bool enable) {
+  void _toggleMic(bool enable) async {
     if (enable) {
+      if (Platform.isAndroid) {
+        final hasPermission = await AudioEngine.ensureRecordAudioPermission();
+        if (!hasPermission) {
+          if (mounted) {
+            setState(() {
+              _isMicActive = false;
+            });
+          }
+          return;
+        }
+      }
       final ok = _audioEngine.startMic();
-      setState(() {
-        _isMicActive = ok;
-      });
+      if (mounted) {
+        setState(() {
+          _isMicActive = ok;
+        });
+      }
     } else {
       _audioEngine.stopMic();
-      setState(() {
-        _isMicActive = false;
-      });
+      if (mounted) {
+        setState(() {
+          _isMicActive = false;
+        });
+      }
     }
   }
 

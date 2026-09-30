@@ -5,8 +5,10 @@
 #include <chrono>
 #include <cmath>
 #include <complex>
+#include <cstring>
 #include <limits>
 #include <thread>
+#include <vector>
 
 #if defined(__APPLE__)
 #include <AudioToolbox/AudioToolbox.h>
@@ -44,7 +46,6 @@ static void appleAudioQueueCallback(
     AudioQueueEnqueueBuffer(queue, buffer, 0, nullptr);
 }
 
-#if defined(__APPLE__)
 class AppleAudioPlayer {
 public:
     static AppleAudioPlayer& instance() {
@@ -99,6 +100,7 @@ public:
             duration_left_.store(0.0f, std::memory_order_relaxed);
             return;
         }
+        total_duration_.store(duration_sec, std::memory_order_relaxed);
         target_freq_.store(freq_hz, std::memory_order_relaxed);
         duration_left_.store(duration_sec, std::memory_order_release);
     }
@@ -108,6 +110,7 @@ public:
         const UInt32 count = buffer->mAudioDataBytesCapacity / sizeof(float);
         const float freq = target_freq_.load(std::memory_order_relaxed);
         float left = duration_left_.load(std::memory_order_acquire);
+        const float total_dur = total_duration_.load(std::memory_order_relaxed);
 
         if (freq <= 0.0f || left <= 0.0f) {
             std::memset(out, 0, buffer->mAudioDataBytesCapacity);
@@ -126,8 +129,12 @@ public:
                 out[i] = 0.0f;
                 continue;
             }
-            // Rich violin tone with warm harmonics and smooth decay envelope
-            const float env = std::min(1.0f, left * 25.0f) * 0.40f;
+            // Smooth attack (15ms ramp) and release (30ms ramp) envelope to eliminate clicks
+            const float elapsed = std::max(0.0f, total_dur - left);
+            const float attack = std::min(1.0f, elapsed * 66.0f);
+            const float release = std::min(1.0f, left * 33.0f);
+            const float env = attack * release * 0.42f;
+
             out[i] = env * (0.65f * std::sin(phase_) + 0.25f * std::sin(2.0f * phase_) + 0.10f * std::sin(3.0f * phase_));
             phase_ += phase_step;
             if (phase_ >= kTwoPi) phase_ -= kTwoPi;
@@ -152,6 +159,7 @@ private:
     static constexpr UInt32 kBufferSampleCount = 1024;
     AudioQueueBufferRef buffers_[kNumBuffers]{};
     std::atomic<float> target_freq_{0.0f};
+    std::atomic<float> total_duration_{0.0f};
     std::atomic<float> duration_left_{0.0f};
     float phase_{0.0f};
 };
@@ -159,9 +167,210 @@ private:
 void playAudioTone(float freq_hz, float duration_sec) noexcept {
     AppleAudioPlayer::instance().play(freq_hz, duration_sec);
 }
+
+} // namespace violin
+#elif defined(__ANDROID__)
+#include <aaudio/AAudio.h>
+
+namespace violin {
+
+struct AndroidAudioCapture {
+    AAudioStream* stream{nullptr};
+    ViolinTracker* tracker{nullptr};
+    std::atomic<bool> is_recording{false};
+    bool is_float_format{true};
+    std::vector<float> conversion_buffer;
+};
+
+static aaudio_data_callback_result_t androidAudioInputCallback(
+    AAudioStream* /*stream*/,
+    void* userData,
+    void* audioData,
+    int32_t numFrames)
+{
+    auto* capture = static_cast<AndroidAudioCapture*>(userData);
+    if (!capture || !capture->is_recording.load(std::memory_order_acquire)) {
+        return AAUDIO_CALLBACK_RESULT_CONTINUE;
+    }
+
+    if (numFrames <= 0 || !capture->tracker || !audioData) {
+        return AAUDIO_CALLBACK_RESULT_CONTINUE;
+    }
+
+    if (capture->is_float_format) {
+        const float* samples = static_cast<const float*>(audioData);
+        capture->tracker->pushSamples(samples, static_cast<std::size_t>(numFrames));
+    } else {
+        const int16_t* pcm16 = static_cast<const int16_t*>(audioData);
+        if (capture->conversion_buffer.size() < static_cast<std::size_t>(numFrames)) {
+            capture->conversion_buffer.resize(numFrames);
+        }
+        constexpr float kNorm = 1.0f / 32768.0f;
+        for (int32_t i = 0; i < numFrames; ++i) {
+            capture->conversion_buffer[i] = static_cast<float>(pcm16[i]) * kNorm;
+        }
+        capture->tracker->pushSamples(capture->conversion_buffer.data(), static_cast<std::size_t>(numFrames));
+    }
+
+    return AAUDIO_CALLBACK_RESULT_CONTINUE;
+}
+
+class AndroidAudioPlayer {
+public:
+    static AndroidAudioPlayer& instance() {
+        static AndroidAudioPlayer s_instance;
+        return s_instance;
+    }
+
+    AndroidAudioPlayer() {
+        initStream();
+    }
+
+    ~AndroidAudioPlayer() {
+        closeStream();
+    }
+
+    void play(float freq_hz, float duration_sec) {
+        if (freq_hz <= 0.0f || duration_sec <= 0.0f) {
+            duration_left_.store(0.0f, std::memory_order_relaxed);
+            return;
+        }
+        if (!stream_) {
+            initStream();
+        }
+        total_duration_.store(duration_sec, std::memory_order_relaxed);
+        target_freq_.store(freq_hz, std::memory_order_relaxed);
+        duration_left_.store(duration_sec, std::memory_order_release);
+
+        if (stream_) {
+            aaudio_stream_state_t state = AAudioStream_getState(stream_);
+            if (state == AAUDIO_STREAM_STATE_PAUSED || state == AAUDIO_STREAM_STATE_STOPPED) {
+                AAudioStream_requestStart(stream_);
+            }
+        }
+    }
+
+    void fillBuffer(float* out, int32_t numFrames) {
+        const float freq = target_freq_.load(std::memory_order_relaxed);
+        float left = duration_left_.load(std::memory_order_acquire);
+        const float total_dur = total_duration_.load(std::memory_order_relaxed);
+
+        if (freq <= 0.0f || left <= 0.0f) {
+            std::memset(out, 0, numFrames * sizeof(float));
+            return;
+        }
+
+        constexpr float kSampleRate = 44100.0f;
+        constexpr float kTwoPi = 6.28318530717958647692f;
+        const float phase_step = kTwoPi * freq / kSampleRate;
+        const float dt = 1.0f / kSampleRate;
+
+        for (int32_t i = 0; i < numFrames; ++i) {
+            if (left <= 0.0f) {
+                out[i] = 0.0f;
+                continue;
+            }
+            const float elapsed = std::max(0.0f, total_dur - left);
+            const float attack = std::min(1.0f, elapsed * 66.0f);
+            const float release = std::min(1.0f, left * 33.0f);
+            const float env = attack * release * 0.42f;
+
+            out[i] = env * (0.65f * std::sin(phase_) + 0.25f * std::sin(2.0f * phase_) + 0.10f * std::sin(3.0f * phase_));
+            phase_ += phase_step;
+            if (phase_ >= kTwoPi) phase_ -= kTwoPi;
+            left -= dt;
+        }
+
+        duration_left_.store(std::max(0.0f, left), std::memory_order_release);
+    }
+
+    void fillBufferI16(int16_t* out, int32_t numFrames) {
+        if (float_buf_.size() < static_cast<std::size_t>(numFrames)) {
+            float_buf_.resize(numFrames);
+        }
+        fillBuffer(float_buf_.data(), numFrames);
+        for (int32_t i = 0; i < numFrames; ++i) {
+            float s = std::clamp(float_buf_[i], -1.0f, 1.0f);
+            out[i] = static_cast<int16_t>(s * 32767.0f);
+        }
+    }
+
+    bool isFloatFormat() const { return is_float_format_; }
+
+private:
+    void initStream() {
+        AAudioStreamBuilder* builder = nullptr;
+        aaudio_result_t result = AAudio_createStreamBuilder(&builder);
+        if (result != AAUDIO_OK || !builder) {
+            return;
+        }
+
+        AAudioStreamBuilder_setDirection(builder, AAUDIO_DIRECTION_OUTPUT);
+        AAudioStreamBuilder_setSampleRate(builder, 44100);
+        AAudioStreamBuilder_setChannelCount(builder, 1);
+        AAudioStreamBuilder_setFormat(builder, AAUDIO_FORMAT_PCM_FLOAT);
+        AAudioStreamBuilder_setPerformanceMode(builder, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
+        AAudioStreamBuilder_setSharingMode(builder, AAUDIO_SHARING_MODE_SHARED);
+        AAudioStreamBuilder_setDataCallback(builder, androidAudioOutputCallback, this);
+
+        result = AAudioStreamBuilder_openStream(builder, &stream_);
+        if (result != AAUDIO_OK || !stream_) {
+            AAudioStreamBuilder_setFormat(builder, AAUDIO_FORMAT_PCM_I16);
+            result = AAudioStreamBuilder_openStream(builder, &stream_);
+        }
+        AAudioStreamBuilder_delete(builder);
+
+        if (result == AAUDIO_OK && stream_) {
+            aaudio_format_t fmt = AAudioStream_getFormat(stream_);
+            is_float_format_ = (fmt == AAUDIO_FORMAT_PCM_FLOAT);
+            AAudioStream_requestStart(stream_);
+        }
+    }
+
+    void closeStream() {
+        if (stream_) {
+            AAudioStream_requestStop(stream_);
+            AAudioStream_close(stream_);
+            stream_ = nullptr;
+        }
+    }
+
+    static aaudio_data_callback_result_t androidAudioOutputCallback(
+        AAudioStream* /*stream*/,
+        void* userData,
+        void* audioData,
+        int32_t numFrames)
+    {
+        auto* player = static_cast<AndroidAudioPlayer*>(userData);
+        if (player) {
+            if (player->isFloatFormat()) {
+                player->fillBuffer(static_cast<float*>(audioData), numFrames);
+            } else {
+                player->fillBufferI16(static_cast<int16_t*>(audioData), numFrames);
+            }
+        }
+        return AAUDIO_CALLBACK_RESULT_CONTINUE;
+    }
+
+    AAudioStream* stream_{nullptr};
+    std::atomic<float> target_freq_{0.0f};
+    std::atomic<float> total_duration_{0.0f};
+    std::atomic<float> duration_left_{0.0f};
+    float phase_{0.0f};
+    bool is_float_format_{true};
+    std::vector<float> float_buf_;
+};
+
+void playAudioTone(float freq_hz, float duration_sec) noexcept {
+    AndroidAudioPlayer::instance().play(freq_hz, duration_sec);
+}
+
+} // namespace violin
 #else
+
+namespace violin {
+
 void playAudioTone(float /*freq_hz*/, float /*duration_sec*/) noexcept {}
-#endif
 
 } // namespace violin
 #endif
@@ -355,6 +564,54 @@ bool ViolinTracker::startMic() noexcept
     platform_mic_handle_ = capture;
     mic_active_.store(true, std::memory_order_release);
     return true;
+#elif defined(__ANDROID__)
+    auto* capture = new (std::nothrow) AndroidAudioCapture();
+    if (!capture) {
+        return false;
+    }
+    capture->tracker = this;
+
+    AAudioStreamBuilder* builder = nullptr;
+    aaudio_result_t result = AAudio_createStreamBuilder(&builder);
+    if (result != AAUDIO_OK || !builder) {
+        delete capture;
+        return false;
+    }
+
+    AAudioStreamBuilder_setDirection(builder, AAUDIO_DIRECTION_INPUT);
+    AAudioStreamBuilder_setSampleRate(builder, static_cast<int32_t>(sample_rate_));
+    AAudioStreamBuilder_setChannelCount(builder, 1);
+    AAudioStreamBuilder_setFormat(builder, AAUDIO_FORMAT_PCM_FLOAT);
+    AAudioStreamBuilder_setPerformanceMode(builder, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
+    AAudioStreamBuilder_setSharingMode(builder, AAUDIO_SHARING_MODE_SHARED);
+    AAudioStreamBuilder_setDataCallback(builder, androidAudioInputCallback, capture);
+
+    result = AAudioStreamBuilder_openStream(builder, &capture->stream);
+    if (result != AAUDIO_OK || !capture->stream) {
+        AAudioStreamBuilder_setFormat(builder, AAUDIO_FORMAT_PCM_I16);
+        result = AAudioStreamBuilder_openStream(builder, &capture->stream);
+        if (result != AAUDIO_OK || !capture->stream) {
+            AAudioStreamBuilder_delete(builder);
+            delete capture;
+            return false;
+        }
+    }
+    AAudioStreamBuilder_delete(builder);
+
+    aaudio_format_t fmt = AAudioStream_getFormat(capture->stream);
+    capture->is_float_format = (fmt == AAUDIO_FORMAT_PCM_FLOAT);
+
+    result = AAudioStream_requestStart(capture->stream);
+    if (result != AAUDIO_OK) {
+        AAudioStream_close(capture->stream);
+        delete capture;
+        return false;
+    }
+
+    capture->is_recording.store(true, std::memory_order_release);
+    platform_mic_handle_ = capture;
+    mic_active_.store(true, std::memory_order_release);
+    return true;
 #else
     return false;
 #endif
@@ -371,6 +628,17 @@ void ViolinTracker::stopMic() noexcept
         capture->is_recording.store(false, std::memory_order_release);
         AudioQueueStop(capture->queue, true);
         AudioQueueDispose(capture->queue, true);
+        delete capture;
+        platform_mic_handle_ = nullptr;
+    }
+#elif defined(__ANDROID__)
+    if (platform_mic_handle_) {
+        auto* capture = static_cast<AndroidAudioCapture*>(platform_mic_handle_);
+        capture->is_recording.store(false, std::memory_order_release);
+        if (capture->stream) {
+            AAudioStream_requestStop(capture->stream);
+            AAudioStream_close(capture->stream);
+        }
         delete capture;
         platform_mic_handle_ = nullptr;
     }
@@ -490,10 +758,15 @@ float ViolinTracker::calculateMPM(
         }
     }
 
-    float best_pitch = 0.0f;
-    float best_nsdf = -1.0f;
+    struct MpmPeak {
+        float lag;
+        float nsdf;
+        float pitch;
+    };
+    std::vector<MpmPeak> peaks;
+    float max_peak_nsdf = 0.0f;
 
-    // Find local maxima over threshold
+    // Find all local maxima over threshold
     for (std::size_t lag = min_lag + 1; lag + 1 <= max_lag; ++lag) {
         const float prev = nsdf[lag - 1];
         const float current = nsdf[lag];
@@ -525,17 +798,56 @@ float ViolinTracker::calculateMPM(
             continue;
         }
 
-        if (current > best_nsdf) {
-            best_nsdf = current;
-            best_pitch = candidate_pitch;
+        peaks.push_back({refined_lag, current, candidate_pitch});
+        if (current > max_peak_nsdf) {
+            max_peak_nsdf = current;
+        }
+    }
+
+    if (peaks.empty() || max_peak_nsdf < kMPMThreshold) {
+        return 0.0f;
+    }
+
+    // Standard McLeod Pitch Method (MPM) octave-error prevention:
+    // Any multiple of the fundamental period (lag = 2*T0, 3*T0) will also create an NSDF peak,
+    // often with slightly higher correlation than T0 (causing octave-lower error).
+    // Therefore, MPM picks the FIRST local maximum peak that exceeds (0.80 * max_peak_nsdf).
+    constexpr float kCutoffCoeff = 0.80f;
+    const float cutoff = max_peak_nsdf * kCutoffCoeff;
+
+    float best_pitch = 0.0f;
+    float best_nsdf = 0.0f;
+    float best_lag = 0.0f;
+
+    for (const auto& p : peaks) {
+        if (p.nsdf >= cutoff) {
+            best_pitch = p.pitch;
+            best_nsdf = p.nsdf;
+            best_lag = p.lag;
+            break;
         }
     }
 
     if (best_pitch <= 0.0f) {
-        return 0.0f;
+        best_pitch = peaks.front().pitch;
+        best_nsdf = peaks.front().nsdf;
+        best_lag = peaks.front().lag;
     }
 
-    confidence = std::clamp(best_nsdf, 0.0f, 1.0f);
+    // Octave-up error prevention (e.g. smartphone mic rolling off fundamental below 300Hz,
+    // causing 2nd harmonic at half-period T0/2 to look like the primary peak):
+    // If a significant subharmonic peak exists at ~2 * best_lag, verify if it's the fundamental.
+    for (const auto& p : peaks) {
+        if (p.lag > best_lag * 1.85f && p.lag < best_lag * 2.15f) {
+            if (p.nsdf >= 0.65f * best_nsdf && p.nsdf >= kMPMThreshold) {
+                best_pitch = p.pitch;
+                best_nsdf = p.nsdf;
+                break;
+            }
+        }
+    }
+
+    confidence = std::clamp(max_peak_nsdf, 0.0f, 1.0f);
     return best_pitch;
 }
 
@@ -763,10 +1075,12 @@ PitchResult ViolinTracker::processFrame(
     const float spectral_flatness = calculateSpectralFlatness(frame);
     const float hnr_db = calculateHarmonicsToNoise(frame, pitch);
 
-    const bool high_noise_floor = spectral_flatness > kScratchFlatnessThreshold;
-    const bool weak_harmonic_structure = hnr_db < kScratchHnrThresholdDb;
+    const bool high_noise_floor = spectral_flatness > 0.45f;
+    const bool weak_harmonic_structure = hnr_db < 3.0f;
 
-    result.is_scratching = (high_noise_floor || weak_harmonic_structure) ? 1 : 0;
+    // True scratch only when acoustic energy is loud (rms > 0.025f)
+    // with degraded harmonic periodicity (confidence < 0.65f)
+    result.is_scratching = (rms > 0.025f && confidence < 0.65f && high_noise_floor && weak_harmonic_structure) ? 1 : 0;
 
     return result;
 }

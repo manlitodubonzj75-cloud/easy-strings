@@ -23,20 +23,24 @@ class ApplePrecisionDial extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final noteName = note?.noteName ?? (targetString?.name ?? '--');
-    final noteLetter = noteName.isNotEmpty ? noteName[0] : '-';
-    final octave = noteName.length > 1 ? noteName.substring(1) : '';
+    final solfege = note?.solfegeBase ?? (targetString?.solfegeName ?? '--');
+    final octave = note != null
+        ? '${(note!.midiNote ~/ 12) - 1}'
+        : (targetString != null ? '${(targetString!.openMidi ~/ 12) - 1}' : '');
     final frequencyHz = note?.rawHz ?? (targetString?.standardHz ?? 0.0);
 
     Color accentColor;
     if (note == null) {
       accentColor = AppleViolinTheme.appleBlue;
-    } else if (note!.isScratching) {
-      accentColor = AppleViolinTheme.appleRed;
-    } else if (isInTune) {
+    } else if (cents.abs() <= 5.0) {
+      // Within 5 cents tolerance: pure clean green
       accentColor = AppleViolinTheme.appleGreen;
+    } else if (cents.abs() <= 12.0) {
+      accentColor = AppleViolinTheme.appleGreen.withValues(alpha: 0.85);
+    } else if (cents.abs() <= 25.0) {
+      accentColor = AppleViolinTheme.appleOrange;
     } else {
-      accentColor = cents.abs() < 15 ? AppleViolinTheme.appleOrange : AppleViolinTheme.appleRed;
+      accentColor = AppleViolinTheme.appleRed;
     }
 
     final centsStr = cents >= 0 ? '+${cents.toStringAsFixed(0)}' : cents.toStringAsFixed(0);
@@ -62,7 +66,7 @@ class ApplePrecisionDial extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               Text(
-                targetString != null ? 'Струна ${targetString!.name}' : 'Авто-выбор',
+                targetString != null ? 'Струна ${targetString!.solfegeName}' : 'Авто-выбор',
                 style: const TextStyle(
                   fontSize: 11,
                   fontWeight: FontWeight.w600,
@@ -77,11 +81,11 @@ class ApplePrecisionDial extends StatelessWidget {
                 textBaseline: TextBaseline.alphabetic,
                 children: [
                   Text(
-                    noteLetter,
-                    style: const TextStyle(
-                      fontSize: 54,
+                    solfege,
+                    style: TextStyle(
+                      fontSize: solfege.length > 3 ? 38 : (solfege.length > 2 ? 44 : 52),
                       fontWeight: FontWeight.w800,
-                      letterSpacing: -2,
+                      letterSpacing: -1,
                       color: Colors.white,
                       height: 1.0,
                     ),
@@ -90,7 +94,7 @@ class ApplePrecisionDial extends StatelessWidget {
                     Text(
                       octave,
                       style: const TextStyle(
-                        fontSize: 22,
+                        fontSize: 20,
                         fontWeight: FontWeight.w600,
                         color: AppleViolinTheme.subtext,
                       ),

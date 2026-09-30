@@ -2,12 +2,13 @@ import 'dart:math' as math;
 
 /// Represents one of the 4 strings of a violin.
 enum ViolinString {
-  g(name: 'G', openMidi: 55, standardHz: 196.00, colorHex: 0xFFEF4444, order: 3), // Red
-  d(name: 'D', openMidi: 62, standardHz: 293.66, colorHex: 0xFFF59E0B, order: 2), // Amber
-  a(name: 'A', openMidi: 69, standardHz: 440.00, colorHex: 0xFF10B981, order: 1), // Emerald
-  e(name: 'E', openMidi: 76, standardHz: 659.25, colorHex: 0xFF3B82F6, order: 0); // Blue
+  g(name: 'G', solfegeName: 'Соль', openMidi: 55, standardHz: 196.00, colorHex: 0xFFEF4444, order: 3), // Red
+  d(name: 'D', solfegeName: 'Ре', openMidi: 62, standardHz: 293.66, colorHex: 0xFFF59E0B, order: 2), // Amber
+  a(name: 'A', solfegeName: 'Ля', openMidi: 69, standardHz: 440.00, colorHex: 0xFF10B981, order: 1), // Emerald
+  e(name: 'E', solfegeName: 'Ми', openMidi: 76, standardHz: 659.25, colorHex: 0xFF3B82F6, order: 0); // Blue
 
   final String name;
+  final String solfegeName;
   final int openMidi;
   final double standardHz;
   final int colorHex;
@@ -15,6 +16,7 @@ enum ViolinString {
 
   const ViolinString({
     required this.name,
+    required this.solfegeName,
     required this.openMidi,
     required this.standardHz,
     required this.colorHex,
@@ -94,6 +96,9 @@ class DetectedNoteInfo {
     this.bestFingering,
   });
 
+  String get solfegeName => MusicTheory.midiToSolfege(midiNote);
+  String get solfegeBase => MusicTheory.midiToSolfegeBase(midiNote);
+
   String get pegHint {
     switch (pegAction) {
       case PegAction.inTune:
@@ -144,12 +149,17 @@ class MusicTheory {
       ));
     }
 
-    for (final str in ViolinString.values) {
+    // In violin pedagogy, open strings and standard 0-3 fingerings on each string take priority:
+    // E.g. A4 is open A string (0th finger), E5 is open E string (0th finger).
+    for (final str in [ViolinString.e, ViolinString.a, ViolinString.d, ViolinString.g]) {
       add(str, 0, ViolinFinger.open);
       add(str, 2, ViolinFinger.first);
       add(str, 3, ViolinFinger.lowSecond);
       add(str, 4, ViolinFinger.highSecond);
       add(str, 5, ViolinFinger.third);
+    }
+    // Register 4th fingers (which overlap with the next open string)
+    for (final str in [ViolinString.g, ViolinString.d, ViolinString.a, ViolinString.e]) {
       add(str, 7, ViolinFinger.fourth);
     }
 
@@ -171,6 +181,17 @@ class MusicTheory {
     return '${noteNames[noteIndex]}$octave';
   }
 
+  static String midiToSolfege(int midi) {
+    final noteIndex = midi % 12;
+    final octave = (midi ~/ 12) - 1;
+    return '${solfegeNames[noteIndex]}$octave';
+  }
+
+  static String midiToSolfegeBase(int midi) {
+    final noteIndex = midi % 12;
+    return solfegeNames[noteIndex];
+  }
+
   static double calculateCents(double actualHz, double targetHz) {
     if (actualHz <= 0 || targetHz <= 0) return 0.0;
     return 1200.0 * (math.log(actualHz / targetHz) / math.ln2);
@@ -183,7 +204,7 @@ class MusicTheory {
     bool isScratching, {
     ViolinString? targetString,
     double concertA4Hz = 440.0,
-    double inTuneToleranceCents = 10.0,
+    double inTuneToleranceCents = 5.0,
   }) {
     if (hz < 150.0 || hz > 2500.0 || confidence < 0.40) {
       return null;

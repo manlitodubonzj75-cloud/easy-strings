@@ -134,30 +134,34 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
       _playbackTimeMs = 0;
     });
 
-    int lastSynthIndex = -1;
-    _demoTimer = Timer.periodic(const Duration(milliseconds: 30), (timer) {
+    int lastNotePlayed = -1;
+    _demoTimer = Timer.periodic(const Duration(milliseconds: 20), (timer) {
       if (!mounted || !_isDemoPlaying) {
         timer.cancel();
         return;
       }
       setState(() {
-        _playbackTimeMs += 30;
+        _playbackTimeMs += 20;
 
-        if (_currentNoteIndex < _currentSong.notes.length) {
-          final note = _currentSong.notes[_currentNoteIndex];
-          if (_playbackTimeMs >= note.startTimeMs && lastSynthIndex != _currentNoteIndex) {
-            lastSynthIndex = _currentNoteIndex;
-            final hz = MusicTheory.midiToHz(note.midiNote);
-            final durSec = (note.durationMs / 1000.0).clamp(0.1, 4.0);
-            widget.audioEngine.pushSynthNote(hz, durSec);
-          }
-
-          if (_playbackTimeMs >= note.endTimeMs) {
-            _currentNoteIndex++;
+        int activeIdx = -1;
+        for (int i = 0; i < _currentSong.notes.length; i++) {
+          final n = _currentSong.notes[i];
+          if (_playbackTimeMs >= n.startTimeMs && _playbackTimeMs < n.startTimeMs + n.durationMs) {
+            activeIdx = i;
+            break;
           }
         }
 
-        if (_playbackTimeMs >= _currentSong.totalDurationMs + 800) {
+        if (activeIdx != -1) {
+          _currentNoteIndex = activeIdx;
+          if (lastNotePlayed != activeIdx) {
+            lastNotePlayed = activeIdx;
+            final note = _currentSong.notes[activeIdx];
+            final hz = MusicTheory.midiToHz(note.midiNote);
+            final durSec = (note.durationMs / 1000.0).clamp(0.08, 4.0);
+            widget.audioEngine.playTone(hz, durSec);
+          }
+        } else if (_playbackTimeMs >= _currentSong.totalDurationMs + 400) {
           _stopDemo();
         }
       });
@@ -187,25 +191,35 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
       return;
     }
 
-    final isOctaveMatch = (note.midiNote - targetNote.midiNote).abs() == 12;
-    if (note.midiNote != targetNote.midiNote && !isOctaveMatch) {
-      final isNear = (note.midiNote - targetNote.midiNote).abs() == 1;
+    final semitoneDiff = (note.midiNote - targetNote.midiNote).abs();
+    final isPitchClassMatch = (semitoneDiff % 12) == 0;
+
+    final targetHz = MusicTheory.midiToHz(targetNote.midiNote);
+    final rawCents = MusicTheory.calculateCents(note.rawHz, targetHz);
+    final octaveOffset = (rawCents / 1200.0).round();
+    final intonationCents = rawCents - (octaveOffset * 1200.0);
+
+    if (!isPitchClassMatch) {
+      final semitoneMod = (note.midiNote - targetNote.midiNote) % 12;
+      final isNearHalfStep = (semitoneMod == 1 || semitoneMod == 11);
+      final isFlat = (semitoneMod == 11);
       setState(() {
         _isSoundError = true;
-        _soundErrorMessage = isNear
-            ? (note.midiNote < targetNote.midiNote ? 'Палец низит на полтона' : 'Палец высит на полтона')
-            : 'Неверная нота (${note.noteName} вместо ${targetNote.noteName})';
+        _soundErrorMessage = isNearHalfStep
+            ? (isFlat ? "Палец низит на полутон" : "Палец высит на полутон")
+            : "Неверная нота (${note.solfegeName} вместо ${MusicTheory.midiToSolfege(targetNote.midiNote)})";
       });
       return;
     }
 
-    if (!note.isInTune) {
-      final isFlat = note.cents < 0;
+    // In violin practice, tolerance of +/- 35 cents allows natural playing and vibrato
+    if (intonationCents.abs() > 35.0) {
+      final isFlat = intonationCents < 0;
       setState(() {
         _isSoundError = true;
         _soundErrorMessage = isFlat
-            ? 'Палец низит (${note.cents.toStringAsFixed(0)}¢). Сдвиньте к подставке'
-            : 'Палец высит (+${note.cents.toStringAsFixed(0)}¢). Сдвиньте к колкам';
+            ? "Палец низит (${intonationCents.toStringAsFixed(0)}¢). Сдвиньте к подставке"
+            : "Палец высит (+${intonationCents.toStringAsFixed(0)}¢). Сдвиньте к колкам";
       });
       return;
     }
@@ -262,8 +276,15 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
       return;
     }
 
-    final matchesTarget = note.midiNote == targetNote.midiNote || (note.midiNote - targetNote.midiNote).abs() == 12;
-    if (matchesTarget && note.isInTune) {
+    final semitoneDiff = (note.midiNote - targetNote.midiNote).abs();
+    final isPitchClassMatch = (semitoneDiff % 12) == 0;
+    final targetHz = MusicTheory.midiToHz(targetNote.midiNote);
+    final rawCents = MusicTheory.calculateCents(note.rawHz, targetHz);
+    final octaveOffset = (rawCents / 1200.0).round();
+    final intonationCents = rawCents - (octaveOffset * 1200.0);
+    final matchesTarget = isPitchClassMatch && (intonationCents.abs() <= 35.0);
+
+    if (matchesTarget) {
       if (!targetNote.isHit) {
         int bonus = 100;
         String? slurMsg;
@@ -487,54 +508,56 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // Header: INTERACTIVE REPERTOIRE / Пьесы + "+ MIDI" Pill Button
+          // Header: INTERACTIVE REPERTOIRE / Пьесы + Actions
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            crossAxisAlignment: CrossAxisAlignment.end,
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: const [
-                  Text(
-                    'INTERACTIVE REPERTOIRE',
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: 1.2,
-                      color: AppleViolinTheme.subtext,
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: const [
+                    Text(
+                      'INTERACTIVE REPERTOIRE',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 1.2,
+                        color: AppleViolinTheme.subtext,
+                      ),
                     ),
-                  ),
-                  SizedBox(height: 2),
-                  Text(
-                    'Пьесы',
-                    style: TextStyle(
-                      fontSize: 30,
-                      fontWeight: FontWeight.w800,
-                      letterSpacing: -0.8,
-                      color: Colors.white,
+                    SizedBox(height: 2),
+                    Text(
+                      'Пьесы',
+                      style: TextStyle(
+                        fontSize: 28,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: -0.8,
+                        color: Colors.white,
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
-              // Action Buttons: OMR Photo Scanner + MIDI Upload
               Row(
+                mainAxisSize: MainAxisSize.min,
                 children: [
                   GestureDetector(
                     onTap: _pickScoreImageAndOmr,
                     child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                       decoration: BoxDecoration(
                         color: AppleViolinTheme.appleBlue.withValues(alpha: 0.18),
-                        borderRadius: BorderRadius.circular(20),
+                        borderRadius: BorderRadius.circular(16),
                         border: Border.all(color: AppleViolinTheme.appleBlue.withValues(alpha: 0.45)),
                       ),
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: const [
-                          Icon(Icons.document_scanner_rounded, size: 14, color: AppleViolinTheme.appleBlue),
+                          Icon(Icons.document_scanner_rounded, size: 13, color: AppleViolinTheme.appleBlue),
                           SizedBox(width: 4),
                           Text(
-                            'Фото нот (OMR)',
+                            'OMR',
                             style: TextStyle(
                               fontSize: 11,
                               fontWeight: FontWeight.w700,
@@ -549,19 +572,19 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
                   GestureDetector(
                     onTap: _pickCustomMidi,
                     child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                       decoration: BoxDecoration(
                         color: AppleViolinTheme.elevatedDark,
-                        borderRadius: BorderRadius.circular(20),
+                        borderRadius: BorderRadius.circular(16),
                         border: Border.all(color: Colors.white12),
                       ),
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: const [
-                          Icon(Icons.upload_file_rounded, size: 14, color: Colors.white70),
+                          Icon(Icons.upload_file_rounded, size: 13, color: Colors.white70),
                           SizedBox(width: 4),
                           Text(
-                            '+ MIDI',
+                            'MIDI',
                             style: TextStyle(
                               fontSize: 11,
                               fontWeight: FontWeight.w600,
@@ -806,78 +829,61 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
   }
 
   Widget _buildPlaybackControls() {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            GestureDetector(
-              onTap: () {
-                if (_isPlaying) {
-                  _pausePlayback();
-                } else {
-                  _startPlayback();
-                }
-              },
-              child: Container(
-                width: 42,
-                height: 42,
-                decoration: const BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: AppleViolinTheme.appleBlue,
-                  boxShadow: [AppleViolinTheme.blueGlow],
-                ),
-                child: Icon(
-                  _isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                  color: Colors.white,
-                  size: 26,
-                ),
-              ),
-            ),
-            const SizedBox(width: 8),
-            GestureDetector(
-              onTap: _resetPractice,
-              child: Container(
-                width: 38,
-                height: 38,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: AppleViolinTheme.elevatedDark,
-                  border: Border.all(color: Colors.white10),
-                ),
-                child: const Icon(Icons.refresh_rounded, color: Colors.white70, size: 20),
-              ),
-            ),
-          ],
-        ),
-
-        // Mode Toggles: Wait Note vs In-tempo & Accompaniment
-        Row(
-          children: [
-            // Export to MIDI file button
-            GestureDetector(
-              onTap: _exportCurrentSongMidi,
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
-                decoration: BoxDecoration(
-                  color: AppleViolinTheme.elevatedDark,
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: Colors.white10),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: const [
-                    Icon(Icons.save_alt_rounded, color: Colors.white70, size: 13),
-                    SizedBox(width: 3),
-                    Text(
-                      'MIDI',
-                      style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Colors.white70),
+            // Play / Pause + Reset Buttons
+            Row(
+              children: [
+                GestureDetector(
+                  onTap: () {
+                    if (_isPlaying) {
+                      _pausePlayback();
+                    } else {
+                      _startPlayback();
+                    }
+                  },
+                  child: Container(
+                    width: 44,
+                    height: 44,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: AppleViolinTheme.appleBlue,
+                      boxShadow: [
+                        BoxShadow(
+                          color: AppleViolinTheme.appleBlue.withValues(alpha: 0.35),
+                          blurRadius: 8,
+                          offset: const Offset(0, 3),
+                        ),
+                      ],
                     ),
-                  ],
+                    child: Icon(
+                      _isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                      color: Colors.white,
+                      size: 24,
+                    ),
+                  ),
                 ),
-              ),
+                const SizedBox(width: 8),
+                GestureDetector(
+                  onTap: _resetPractice,
+                  child: Container(
+                    width: 36,
+                    height: 36,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: AppleViolinTheme.elevatedDark,
+                      border: Border.all(color: Colors.white10),
+                    ),
+                    child: const Icon(Icons.refresh_rounded, color: Colors.white70, size: 18),
+                  ),
+                ),
+              ],
             ),
-            const SizedBox(width: 5),
+
             // Demo Playback Button
             GestureDetector(
               onTap: () {
@@ -889,12 +895,14 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
               },
               child: AnimatedContainer(
                 duration: const Duration(milliseconds: 180),
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
                 decoration: BoxDecoration(
-                  color: _isDemoPlaying ? AppleViolinTheme.appleGreen.withValues(alpha: 0.25) : AppleViolinTheme.elevatedDark,
+                  color: _isDemoPlaying
+                      ? AppleViolinTheme.appleGreen.withValues(alpha: 0.25)
+                      : AppleViolinTheme.elevatedDark,
                   borderRadius: BorderRadius.circular(16),
                   border: Border.all(
-                    color: _isDemoPlaying ? AppleViolinTheme.appleGreen : Colors.white10,
+                    color: _isDemoPlaying ? AppleViolinTheme.appleGreen : Colors.white12,
                   ),
                 ),
                 child: Row(
@@ -902,23 +910,31 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
                   children: [
                     Icon(
                       _isDemoPlaying ? Icons.stop_rounded : Icons.headphones_rounded,
-                      color: _isDemoPlaying ? AppleViolinTheme.appleGreen : Colors.white70,
+                      color: _isDemoPlaying ? AppleViolinTheme.appleGreen : Colors.white,
                       size: 14,
                     ),
-                    const SizedBox(width: 4),
+                    const SizedBox(width: 5),
                     Text(
-                      _isDemoPlaying ? 'Стоп' : 'Демо',
+                      _isDemoPlaying ? 'Стоп демо' : '🎧 Демо',
                       style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                        color: _isDemoPlaying ? AppleViolinTheme.appleGreen : Colors.white70,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        color: _isDemoPlaying ? AppleViolinTheme.appleGreen : Colors.white,
                       ),
                     ),
                   ],
                 ),
               ),
             ),
-            const SizedBox(width: 6),
+          ],
+        ),
+        const SizedBox(height: 8),
+
+        // Badges: Mode, Accompaniment, Export MIDI
+        Wrap(
+          spacing: 6,
+          runSpacing: 6,
+          children: [
             // Mode toggle
             GestureDetector(
               onTap: () {
@@ -930,19 +946,30 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
                 });
               },
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
                 decoration: BoxDecoration(
                   color: AppleViolinTheme.elevatedDark,
-                  borderRadius: BorderRadius.circular(16),
+                  borderRadius: BorderRadius.circular(14),
                   border: Border.all(color: Colors.white10),
                 ),
-                child: Text(
-                  _practiceMode == PracticeMode.waitNote ? 'Режим: Ждать ноту' : 'Режим: В темпе',
-                  style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Colors.white70),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      _practiceMode == PracticeMode.waitNote ? Icons.touch_app_rounded : Icons.speed_rounded,
+                      size: 12,
+                      color: AppleViolinTheme.appleOrange,
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      _practiceMode == PracticeMode.waitNote ? 'Режим: Ждать ноту' : 'Режим: В темпе',
+                      style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Colors.white70),
+                    ),
+                  ],
                 ),
               ),
             ),
-            const SizedBox(width: 6),
+
             // Accompaniment toggle
             GestureDetector(
               onTap: () {
@@ -951,23 +978,58 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
                 });
               },
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
                 decoration: BoxDecoration(
                   color: _isAccompanimentOn
                       ? AppleViolinTheme.appleGreen.withValues(alpha: 0.18)
                       : AppleViolinTheme.elevatedDark,
-                  borderRadius: BorderRadius.circular(16),
+                  borderRadius: BorderRadius.circular(14),
                   border: Border.all(
                     color: _isAccompanimentOn ? AppleViolinTheme.appleGreen : Colors.white10,
                   ),
                 ),
-                child: Text(
-                  _isAccompanimentOn ? 'Ф-но: Вкл' : 'Ф-но: Выкл',
-                  style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.bold,
-                    color: _isAccompanimentOn ? AppleViolinTheme.appleGreen : Colors.white60,
-                  ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.volume_up_rounded,
+                      size: 12,
+                      color: _isAccompanimentOn ? AppleViolinTheme.appleGreen : Colors.white60,
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      _isAccompanimentOn ? 'Ф-но: Вкл' : 'Ф-но: Выкл',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: _isAccompanimentOn ? AppleViolinTheme.appleGreen : Colors.white60,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+
+            // Export to MIDI file button
+            GestureDetector(
+              onTap: _exportCurrentSongMidi,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                decoration: BoxDecoration(
+                  color: AppleViolinTheme.elevatedDark,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: Colors.white10),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: const [
+                    Icon(Icons.save_alt_rounded, color: Colors.white70, size: 12),
+                    SizedBox(width: 3),
+                    Text(
+                      'MIDI',
+                      style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Colors.white70),
+                    ),
+                  ],
                 ),
               ),
             ),

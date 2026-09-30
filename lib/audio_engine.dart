@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:ffi';
 import 'dart:io' show File, Platform, Directory;
 import 'dart:isolate';
+import 'package:flutter/services.dart' show MethodChannel;
 
 /// -------------------------------------------------------------------------
 /// Native ABI
@@ -83,6 +84,15 @@ typedef _PushSynthNoteDart = void Function(
   double durationSec,
 );
 
+typedef _PlayToneNative = Void Function(
+  Float frequencyHz,
+  Float durationSec,
+);
+typedef _PlayToneDart = void Function(
+  double frequencyHz,
+  double durationSec,
+);
+
 /// -------------------------------------------------------------------------
 /// Dart-level result
 /// -------------------------------------------------------------------------
@@ -138,6 +148,23 @@ final class _WorkerStopPayload {
 /// -------------------------------------------------------------------------
 
 class AudioEngine {
+  static const MethodChannel _permissionsChannel =
+      MethodChannel('com.easyviolin.easy_violin/permissions');
+
+  static Future<bool> ensureRecordAudioPermission() async {
+    if (!Platform.isAndroid) return true;
+    try {
+      final bool hasPermission =
+          await _permissionsChannel.invokeMethod<bool>('hasRecordAudioPermission') ?? false;
+      if (hasPermission) return true;
+      final bool granted =
+          await _permissionsChannel.invokeMethod<bool>('requestRecordAudioPermission') ?? false;
+      return granted;
+    } catch (_) {
+      return false;
+    }
+  }
+
   Isolate? _workerIsolate;
   SendPort? _workerCommandPort;
   ReceivePort? _resultReceivePort;
@@ -152,6 +179,7 @@ class AudioEngine {
   _IsMicActiveDart? _isMicActive;
   _PushSamplesDart? _pushSamples;
   _PushSynthNoteDart? _pushSynthNote;
+  _PlayToneDart? _playTone;
 
   StreamController<PitchResult>? _controller;
   Stream<PitchResult>? _results;
@@ -254,7 +282,17 @@ class AudioEngine {
     fn(handle, frequencyHz, durationSec);
   }
 
+  void playTone(double frequencyHz, [double durationSec = 1.0]) {
+    final fn = _playTone;
+    if (fn != null) {
+      fn(frequencyHz, durationSec);
+    } else {
+      pushSynthNote(frequencyHz, durationSec);
+    }
+  }
+
   void playSyntheticNote(double frequencyHz, [double durationSec = 1.0]) {
+    playTone(frequencyHz, durationSec);
     pushSynthNote(frequencyHz, durationSec);
   }
 
@@ -298,6 +336,7 @@ class AudioEngine {
     _isMicActive = null;
     _pushSamples = null;
     _pushSynthNote = null;
+    _playTone = null;
 
     _resultReceivePort?.close();
     _resultReceivePort = null;
@@ -329,6 +368,9 @@ class AudioEngine {
     _pushSynthNote = library.lookupFunction<_PushSynthNoteNative, _PushSynthNoteDart>(
       'violin_processor_push_synth_note',
     );
+    try {
+      _playTone = library.lookupFunction<_PlayToneNative, _PlayToneDart>('violin_play_tone');
+    } catch (_) {}
   }
 
   static DynamicLibrary _openLibrary() {
