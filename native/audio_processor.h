@@ -4,10 +4,12 @@
 
 #include <array>
 #include <atomic>
+#include <complex>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <thread>
+#include <vector>
 
 namespace violin {
 
@@ -15,20 +17,15 @@ constexpr std::size_t kSampleRate = 44100;
 // Frame size of 2048 gives ~46.4ms analysis window, hop size of 512 gives ~11.6ms update rate (~86Hz)
 constexpr std::size_t kFrameSize  = 2048;
 constexpr std::size_t kHopSize    = 512;
+constexpr std::size_t kFFTSize    = kFrameSize;
+
+using Complex = std::complex<float>;
 
 /**
  * Fixed-size ABI structure.
- *
- * Layout:
- *   float frequency_hz   0..3
- *   float confidence     4..7
- *   uint8 is_scratching  8
- *   uint8 is_legato      9  (1 if transition from previous note was continuous on one bow stroke)
- *   uint8 rms_energy     10 (0..255 scaled RMS loudness)
- *   uint8 reserved       11
- *
- * Total expected size: 12 bytes.
+ * Matches PitchResult in Dart side directly via ffi.
  */
+#pragma pack(push, 1)
 struct PitchResult {
     float frequency_hz;
     float confidence;
@@ -37,39 +34,34 @@ struct PitchResult {
     std::uint8_t rms_energy;
     std::uint8_t reserved;
 };
+#pragma pack(pop)
 
-static_assert(sizeof(PitchResult) == 12,
-              "PitchResult ABI layout must stay 12 bytes");
+static_assert(sizeof(PitchResult) == 12, "PitchResult must be exactly 12 bytes");
 
-/**
- * Callback is intentionally void for Dart NativeCallable.listener.
- */
 using PitchCallback = void (*)(PitchResult result);
 
-class ViolinTracker final {
+class ViolinTracker {
 public:
-    explicit ViolinTracker(float sample_rate = 44100.0f);
+    explicit ViolinTracker(std::size_t sample_rate = kSampleRate);
     ~ViolinTracker();
 
     ViolinTracker(const ViolinTracker&) = delete;
     ViolinTracker& operator=(const ViolinTracker&) = delete;
 
-    bool start() noexcept;
-    void stop() noexcept;
+    void start();
+    void stop();
 
-    /**
-     * Start/stop native platform microphone capture directly into the ring buffer.
-     */
-    bool startMic() noexcept;
-    void stopMic() noexcept;
+    bool isRunning() const noexcept;
+
+    bool startMic();
+    void stopMic();
     bool isMicActive() const noexcept;
 
-    std::size_t pushSamples(
-        const float* samples,
-        std::size_t count) noexcept;
+    std::size_t pushSamples(const float* samples, std::size_t count) noexcept;
 
-    void setCallback(
-        PitchCallback callback) noexcept;
+    void setCallback(PitchCallback callback) noexcept;
+
+    float getStablePitch() const noexcept;
 
 private:
     void workerLoop() noexcept;
@@ -79,25 +71,28 @@ private:
 
     float calculateMPM(
         const std::array<float, kFrameSize>& frame,
-        float& confidence) const noexcept;
+        float& confidence,
+        const std::array<Complex, kFFTSize>& spectrum) const noexcept;
 
     float calculateSpectralFlatness(
-        const std::array<float, kFrameSize>& frame) const noexcept;
+        const std::array<Complex, kFFTSize>& spectrum) const noexcept;
 
     float calculateHarmonicsToNoise(
-        const std::array<float, kFrameSize>& frame,
+        const std::array<Complex, kFFTSize>& spectrum,
         float fundamental_hz) const noexcept;
 
     float calculateDynamicTolerance(
         float base_cents,
         float local_variance,
-        float stretch = 1.0f) const noexcept;
+        float stretch) const noexcept;
 
     float estimateLocalPitchVariance() const noexcept;
+
     void updatePitchHistory(float pitch_hz) noexcept;
 
 private:
-    float sample_rate_;
+    std::size_t sample_rate_{kSampleRate};
+
     std::atomic<bool> running_{false};
     std::atomic<bool> mic_active_{false};
     void* platform_mic_handle_{nullptr};
@@ -121,6 +116,7 @@ private:
     static constexpr float kScratchHnrThresholdDb = 6.0f;
 };
 
-
-void playAudioTone(float freq_hz, float duration_sec) noexcept;
+void playAudioTone(float freq_hz, float duration_sec, bool is_legato = false) noexcept;
+bool isAudioTonePlaying() noexcept;
+void stopAudioTone() noexcept;
 } // namespace violin

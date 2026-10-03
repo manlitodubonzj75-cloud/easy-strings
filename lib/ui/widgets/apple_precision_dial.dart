@@ -10,6 +10,10 @@ class ApplePrecisionDial extends StatelessWidget {
   final bool isInTune;
   final ViolinString? targetString;
   final double size;
+  final String? customSublabel;
+  final String? customSolfege;
+  final String? customOctave;
+  final double? customFrequencyHz;
 
   const ApplePrecisionDial({
     super.key,
@@ -19,15 +23,20 @@ class ApplePrecisionDial extends StatelessWidget {
     required this.isInTune,
     this.targetString,
     this.size = 230,
+    this.customSublabel,
+    this.customSolfege,
+    this.customOctave,
+    this.customFrequencyHz,
   });
 
   @override
   Widget build(BuildContext context) {
-    final solfege = note?.solfegeBase ?? (targetString?.solfegeName ?? '--');
-    final octave = note != null
+    final solfege = customSolfege ?? (note?.solfegeBase ?? (targetString?.solfegeName ?? '--'));
+    final octave = customOctave ?? (note != null
         ? '${(note!.midiNote ~/ 12) - 1}'
-        : (targetString != null ? '${(targetString!.openMidi ~/ 12) - 1}' : '');
-    final frequencyHz = note?.rawHz ?? (targetString?.standardHz ?? 0.0);
+        : (targetString != null ? '${(targetString!.openMidi ~/ 12) - 1}' : ''));
+    final frequencyHz = customFrequencyHz ?? (note?.rawHz ?? (targetString?.standardHz ?? 0.0));
+    final sublabel = customSublabel ?? (targetString != null ? 'Струна ${targetString!.solfegeName}' : 'Авто-выбор');
 
     Color accentColor;
     if (note == null) {
@@ -66,7 +75,7 @@ class ApplePrecisionDial extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               Text(
-                targetString != null ? 'Струна ${targetString!.solfegeName}' : 'Авто-выбор',
+                sublabel,
                 style: const TextStyle(
                   fontSize: 11,
                   fontWeight: FontWeight.w600,
@@ -83,7 +92,7 @@ class ApplePrecisionDial extends StatelessWidget {
                   Text(
                     solfege,
                     style: TextStyle(
-                      fontSize: solfege.length > 3 ? 38 : (solfege.length > 2 ? 44 : 52),
+                      fontSize: solfege.length > 3 ? 34 : (solfege.length > 2 ? 40 : 48),
                       fontWeight: FontWeight.w800,
                       letterSpacing: -1,
                       color: Colors.white,
@@ -149,11 +158,11 @@ class ApplePrecisionDial extends StatelessWidget {
                       decoration: BoxDecoration(
                         color: Colors.white,
                         borderRadius: BorderRadius.circular(3),
-                        boxShadow: [
+                        boxShadow: const [
                           BoxShadow(
-                            color: accentColor.withValues(alpha: 0.8),
-                            blurRadius: 10,
-                            spreadRadius: 2,
+                            color: Colors.black54,
+                            blurRadius: 4,
+                            spreadRadius: 1,
                           ),
                         ],
                       ),
@@ -185,15 +194,16 @@ class _DialArcPainter extends CustomPainter {
     final center = Offset(size.width / 2, size.height / 2);
     final radius = size.width / 2 - 16;
 
-    // Track arc spanning 240 degrees (from 150 deg to 390 deg)
-    const startAngle = math.pi * 0.75; // 135 deg
-    const sweepAngle = math.pi * 1.5;  // 270 deg
-
+    // Draw dark outer ring base track
     final bgPaint = Paint()
-      ..color = const Color(0xFF2C2C2E)
+      ..color = const Color(0xFF1E212D)
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 6.0
+      ..strokeWidth = 6
       ..strokeCap = StrokeCap.round;
+
+    // 240 degrees arc (from 150 to 390 degrees)
+    const sweepAngle = math.pi * 1.35;
+    const startAngle = math.pi * 0.5 + (2 * math.pi - sweepAngle) / 2;
 
     canvas.drawArc(
       Rect.fromCircle(center: center, radius: radius),
@@ -203,46 +213,69 @@ class _DialArcPainter extends CustomPainter {
       bgPaint,
     );
 
-    // Center in-tune tick
-    final tickPaint = Paint()
-      ..color = Colors.white30
-      ..strokeWidth = 2.0;
+    // Draw In-Tune Center Zone Marker
+    final centerAngle = startAngle + sweepAngle / 2;
+    final inTuneMarkerPaint = Paint()
+      ..color = AppleViolinTheme.appleGreen.withValues(alpha: 0.6)
+      ..strokeWidth = 3;
 
-    final topCenter = Offset(center.dx, center.dy - radius);
-    canvas.drawLine(
-      Offset(topCenter.dx, topCenter.dy - 6),
-      Offset(topCenter.dx, topCenter.dy + 6),
-      tickPaint,
+    final markerInner = Offset(
+      center.dx + (radius - 8) * math.cos(centerAngle),
+      center.dy + (radius - 8) * math.sin(centerAngle),
     );
+    final markerOuter = Offset(
+      center.dx + (radius + 8) * math.cos(centerAngle),
+      center.dy + (radius + 8) * math.sin(centerAngle),
+    );
+    canvas.drawLine(markerInner, markerOuter, inTuneMarkerPaint);
 
+    // Draw Scale Tick Marks
+    const totalTicks = 25;
+    final tickPaint = Paint()
+      ..color = Colors.white.withValues(alpha: 0.25)
+      ..strokeWidth = 1.2;
+
+    for (int i = 0; i < totalTicks; i++) {
+      final t = i / (totalTicks - 1);
+      final angle = startAngle + t * sweepAngle;
+      final isMajor = i % 6 == 0;
+
+      final len = isMajor ? 10.0 : 5.0;
+      final p1 = Offset(
+        center.dx + (radius - len) * math.cos(angle),
+        center.dy + (radius - len) * math.sin(angle),
+      );
+      final p2 = Offset(
+        center.dx + radius * math.cos(angle),
+        center.dy + radius * math.sin(angle),
+      );
+
+      tickPaint.color = isMajor
+          ? Colors.white.withValues(alpha: 0.5)
+          : Colors.white.withValues(alpha: 0.15);
+      tickPaint.strokeWidth = isMajor ? 1.8 : 1.0;
+      canvas.drawLine(p1, p2, tickPaint);
+    }
+
+    // Draw active cents deviation arc from center (zero)
     if (isListening) {
-      final activePaint = Paint()
+      final clampedCents = cents.clamp(-50.0, 50.0);
+      final centsFraction = clampedCents / 50.0;
+      final activeSweep = centsFraction * (sweepAngle / 2);
+
+      final activeArcPaint = Paint()
         ..color = color
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 7.0
+        ..strokeWidth = 6
         ..strokeCap = StrokeCap.round;
 
-      // Arc from center (top, -pi/2) to deviation
-      const midAngle = -math.pi / 2;
-      final devAngle = (cents.clamp(-50.0, 50.0) / 50.0) * (math.pi * 0.65);
-
-      if (devAngle >= 0) {
-        canvas.drawArc(
-          Rect.fromCircle(center: center, radius: radius),
-          midAngle,
-          devAngle,
-          false,
-          activePaint,
-        );
-      } else {
-        canvas.drawArc(
-          Rect.fromCircle(center: center, radius: radius),
-          midAngle + devAngle,
-          -devAngle,
-          false,
-          activePaint,
-        );
-      }
+      canvas.drawArc(
+        Rect.fromCircle(center: center, radius: radius),
+        centerAngle,
+        activeSweep,
+        false,
+        activeArcPaint,
+      );
     }
   }
 

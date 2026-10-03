@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'audio_engine.dart';
 import 'music_theory.dart';
 import 'theme/apple_violin_theme.dart';
+import 'services/settings_service.dart';
 import 'ui/song_practice_screen.dart';
 import 'ui/synth_test_panel.dart';
 import 'ui/trainer_screen.dart';
@@ -48,6 +49,8 @@ class MainViolinScreen extends StatefulWidget {
 class _MainViolinScreenState extends State<MainViolinScreen> {
   final AudioEngine _audioEngine = AudioEngine();
   StreamSubscription<PitchResult>? _pitchSub;
+  final ValueNotifier<DetectedNoteInfo?> _noteNotifier = ValueNotifier<DetectedNoteInfo?>(null);
+  SettingsService? _settings;
 
   int _selectedTabIndex = 0;
   ViolinString? _selectedTunerString;
@@ -63,7 +66,19 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
   @override
   void initState() {
     super.initState();
+    _loadSettings();
     _initAudio();
+  }
+
+  Future<void> _loadSettings() async {
+    final s = await SettingsService.init();
+    if (mounted) {
+      setState(() {
+        _settings = s;
+        _concertA4Hz = s.concertA4Hz;
+        _selectedTabIndex = s.lastTab.clamp(0, 2);
+      });
+    }
   }
 
   Future<void> _initAudio() async {
@@ -87,15 +102,22 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
   }
 
   void _onPitchResult(PitchResult result) {
+    if (_audioEngine.isTonePlaying) {
+      // Do not evaluate speaker output as student playing
+      return;
+    }
     final now = DateTime.now();
     // Filter faint phantom sounds, background noise & room hum
-    if (result.frequencyHz <= 0 || result.confidence < 0.40) {
-      if (now.difference(_lastNoteTime).inMilliseconds > 250) {
-        if (_currentNote != null) {
-          setState(() {
-            _currentNote = null;
-            _smoothedHz = 0.0;
-          });
+    if (result.frequencyHz <= 0 || result.confidence < 0.35) {
+      if (now.difference(_lastNoteTime).inMilliseconds > 450) {
+        if (_currentNote != null || _noteNotifier.value != null) {
+          _noteNotifier.value = null;
+          _smoothedHz = 0.0;
+          if (mounted) {
+            setState(() {
+              _currentNote = null;
+            });
+          }
         }
       }
       return;
@@ -103,11 +125,19 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
 
     _lastNoteTime = now;
 
-    // Moving average filter for pitch stabilization
-    if (_smoothedHz == 0.0 || (result.frequencyHz - _smoothedHz).abs() > 40.0) {
+    // Logarithmic cents distance filter for pitch stabilization:
+    // Avoids resetting on small intervals in high registers, while immediately
+    // responding to distinct note changes (> 75 cents) or initial onsets.
+    double deltaCents = 999.0;
+    if (_smoothedHz > 0.0 && result.frequencyHz > 0.0) {
+      deltaCents = (1200.0 * (math.log(result.frequencyHz / _smoothedHz) / math.ln2)).abs();
+    }
+
+    if (_smoothedHz == 0.0 || deltaCents > 75.0) {
       _smoothedHz = result.frequencyHz;
     } else {
-      _smoothedHz = _smoothedHz * 0.35 + result.frequencyHz * 0.65;
+      // Smooth micro-pitch variations (vibrato and bow jitter) within the same note
+      _smoothedHz = _smoothedHz * 0.30 + result.frequencyHz * 0.70;
     }
 
     final note = MusicTheory.analyzePitch(
@@ -118,6 +148,7 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
       concertA4Hz: _concertA4Hz,
     );
 
+    _noteNotifier.value = note;
     if (mounted) {
       setState(() {
         _currentNote = note;
@@ -157,6 +188,7 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
   @override
   void dispose() {
     _pitchSub?.cancel();
+    _noteNotifier.dispose();
     _audioEngine.dispose();
     super.dispose();
   }
@@ -165,7 +197,7 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
   Widget build(BuildContext context) {
     final mediaQuery = MediaQuery.of(context);
     final isDesktop = mediaQuery.size.width >= 560;
-    
+
     Widget coreApp = Scaffold(
       backgroundColor: AppleViolinTheme.darkBg,
       body: SafeArea(
@@ -173,7 +205,7 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
         child: Column(
           children: [
             const SizedBox(height: 12),
-            // Main Body by Tab
+            // Main Body by Tab (3 Tabs: Тюнер, Гаммы, Пьесы)
             Expanded(
               child: IndexedStack(
                 index: _selectedTabIndex,
@@ -188,6 +220,7 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
                       setState(() {
                         _concertA4Hz = pitch;
                       });
+                      _settings?.setConcertA4Hz(pitch);
                     },
                     onStringSelected: (str) {
                       setState(() {
@@ -198,10 +231,12 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
                   TrainerScreen(
                     audioEngine: _audioEngine,
                     currentNote: _currentNote,
+                    noteNotifier: _noteNotifier,
                   ),
                   SongPracticeScreen(
                     audioEngine: _audioEngine,
                     currentNote: _currentNote,
+                    noteNotifier: _noteNotifier,
                     isMobileMode: true,
                   ),
                 ],
@@ -269,7 +304,7 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
               mainAxisAlignment: MainAxisAlignment.spaceAround,
               children: [
                 _buildTabItem(0, Icons.adjust_rounded, 'Тюнер'),
-                _buildTabItem(1, Icons.grid_view_rounded, 'Тренировка'),
+                _buildTabItem(1, Icons.queue_music_rounded, 'Гаммы'),
                 _buildTabItem(2, Icons.music_note_rounded, 'Пьесы'),
               ],
             ),
@@ -298,6 +333,7 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
         setState(() {
           _selectedTabIndex = index;
         });
+        _settings?.setLastTab(index);
       },
       behavior: HitTestBehavior.opaque,
       child: Column(

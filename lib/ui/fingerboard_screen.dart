@@ -5,61 +5,70 @@ import '../music_theory.dart';
 class FingerboardScreen extends StatelessWidget {
   final AudioEngine audioEngine;
   final DetectedNoteInfo? currentNote;
+  final ValueNotifier<DetectedNoteInfo?>? noteNotifier;
 
   const FingerboardScreen({
     super.key,
     required this.audioEngine,
-    required this.currentNote,
+    this.currentNote,
+    this.noteNotifier,
   });
 
   @override
   Widget build(BuildContext context) {
-    final activeFingering = currentNote?.bestFingering;
+    Widget buildBody(DetectedNoteInfo? note) {
+      final activeFingering = note?.bestFingering;
 
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      child: Column(
-        children: [
-          // Current Note Header Banner
-          _buildActiveNoteBanner(activeFingering),
-          const SizedBox(height: 12),
-
-          // Interactive Fingerboard Canvas
-          Expanded(
-            child: Container(
-              width: double.infinity,
-              decoration: BoxDecoration(
-                color: const Color(0xFF141721),
-                borderRadius: BorderRadius.circular(24),
-                border: Border.all(color: Colors.white10),
-              ),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(24),
-                child: LayoutBuilder(
-                  builder: (context, constraints) {
-                    return CustomPaint(
-                      size: Size(constraints.maxWidth, constraints.maxHeight),
-                      painter: ViolinFingerboardPainter(
-                        activeFingering: activeFingering,
-                        activeHz: currentNote?.rawHz,
-                        isScratching: currentNote?.isScratching ?? false,
-                        isInTune: currentNote?.isInTune ?? false,
-                      ),
-                      child: _buildInteractiveOverlay(constraints.maxWidth, constraints.maxHeight),
-                    );
-                  },
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        child: Column(
+          children: [
+            _buildActiveNoteBanner(activeFingering),
+            const SizedBox(height: 12),
+            Expanded(
+              child: Container(
+                width: double.infinity,
+                decoration: BoxDecoration(
+                  color: const Color(0xFF141721),
+                  borderRadius: BorderRadius.circular(24),
+                  border: Border.all(color: Colors.white10),
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(24),
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      return CustomPaint(
+                        size: Size(constraints.maxWidth, constraints.maxHeight),
+                        painter: ViolinFingerboardPainter(
+                          activeFingering: activeFingering,
+                          activeHz: note?.rawHz,
+                          isScratching: note?.isScratching ?? false,
+                          isInTune: note?.isInTune ?? false,
+                        ),
+                        child: _buildInteractiveOverlay(constraints.maxWidth, constraints.maxHeight),
+                      );
+                    },
+                  ),
                 ),
               ),
             ),
-          ),
-          const SizedBox(height: 12),
-          const Text(
-            'Нажмите на ноту, чтобы услышать эталонное звучание',
-            style: TextStyle(fontSize: 12, color: Colors.white38),
-          ),
-        ],
-      ),
-    );
+            const SizedBox(height: 12),
+            const Text(
+              'Нажмите на ноту, чтобы услышать эталонное звучание',
+              style: TextStyle(fontSize: 12, color: Colors.white38),
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (noteNotifier != null) {
+      return ValueListenableBuilder<DetectedNoteInfo?>(
+        valueListenable: noteNotifier!,
+        builder: (context, note, child) => buildBody(note),
+      );
+    }
+    return buildBody(currentNote);
   }
 
   Widget _buildActiveNoteBanner(ViolinFingering? fingering) {

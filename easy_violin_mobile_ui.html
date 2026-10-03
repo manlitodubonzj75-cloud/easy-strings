@@ -1,0 +1,1663 @@
+<!DOCTYPE html>
+<html lang="ru" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#07080a">
+  <title>EASY VIOLIN // Интонационный движок</title>
+
+  <!-- Typography CDNs -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Playfair+Display:ital,wght@0,500;0,600;1,400;1,500;1,600&family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            void: '#07080a',
+            obsidian: '#0b0d13',
+            graphite: '#11141c',
+            elevated: '#151823',
+            'high-voltage': '#D4FF00',
+            'electric-cobalt': '#2563EB',
+            'solar-amber': '#FF5500',
+            'hyper-emerald': '#10B981',
+            'crimson-scratch': '#FF2A55'
+          },
+          fontFamily: {
+            sans: ['"Plus Jakarta Sans"', 'system-ui', 'sans-serif'],
+            display: ['Syne', '"Plus Jakarta Sans"', 'sans-serif'],
+            editorial: ['"Playfair Display"', 'Georgia', 'serif'],
+            mono: ['"JetBrains Mono"', 'monospace']
+          },
+          keyframes: {
+            floaty: {
+              '0%,100%': { transform: 'translateY(0px)' },
+              '50%': { transform: 'translateY(-16px)' }
+            }
+          },
+          animation: {
+            'pulse-slow': 'pulse 4s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+            'ping-slow': 'ping 2.4s cubic-bezier(0, 0, 0.2, 1) infinite',
+            'float-slow': 'floaty 9s cubic-bezier(0.45, 0, 0.55, 1) infinite'
+          }
+        }
+      }
+    }
+  </script>
+
+  <style>
+    :root { --ease: cubic-bezier(0.16, 1, 0.3, 1); }
+
+    * { -webkit-tap-highlight-color: transparent; }
+    html { -webkit-text-size-adjust: 100%; }
+    body { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+    ::selection { background: #D4FF00; color: #07080a; }
+
+    ::-webkit-scrollbar { width: 3px; height: 3px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.14); border-radius: 999px; }
+    ::-webkit-scrollbar-thumb:hover { background: #D4FF00; }
+
+    .bg-grid {
+      background-image: radial-gradient(rgba(255,255,255,0.06) 1px, transparent 1px);
+      background-size: 22px 22px;
+    }
+
+    /* Monospaced uppercase micro-telemetry (10-11px, wide tracking) */
+    .micro {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      line-height: 1.35;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+    }
+
+    /* Sub-pixel glass container with volumetric inner highlight */
+    .glass-card {
+      position: relative;
+      z-index: 0;
+      background: linear-gradient(150deg, rgba(255,255,255,0.045), rgba(255,255,255,0.006) 55%, rgba(255,255,255,0.018));
+      backdrop-filter: blur(26px) saturate(140%);
+      -webkit-backdrop-filter: blur(26px) saturate(140%);
+      border: 1px solid rgba(255,255,255,0.08);
+      box-shadow: 0 24px 60px -30px rgba(0,0,0,0.9), inset 0 1px 0 0 rgba(255,255,255,0.06);
+      transition: transform .55s var(--ease), border-color .55s var(--ease), box-shadow .55s var(--ease), background .55s var(--ease);
+    }
+    .glass-card::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      z-index: -1;
+      border-radius: inherit;
+      pointer-events: none;
+      background: radial-gradient(130% 90% at 10% 0%, rgba(212,255,0,0.12), transparent 46%);
+      opacity: .45;
+      transition: opacity .55s var(--ease);
+    }
+    /* Hover physics: lift, border 8% -> 20%, intensified radial highlight */
+    .glass-card:hover {
+      transform: translateY(-3px);
+      border-color: rgba(255,255,255,0.20);
+      box-shadow: 0 40px 90px -40px rgba(0,0,0,0.95), inset 0 1px 0 0 rgba(255,255,255,0.10);
+    }
+    .glass-card:hover::before { opacity: 1; }
+
+    .btn-haptic {
+      transition: transform .28s var(--ease), background-color .35s var(--ease),
+                  border-color .35s var(--ease), color .35s var(--ease), box-shadow .35s var(--ease);
+    }
+    .btn-haptic:active { transform: scale(0.96); }
+
+    /* Primary CTA: stark white pill, kinetic scale on press */
+    .cta-primary {
+      background: #ffffff;
+      color: #07080a;
+      box-shadow: 0 12px 34px -12px rgba(255,255,255,0.45), inset 0 1px 0 rgba(255,255,255,0.9);
+    }
+    .cta-primary:hover { transform: translateY(-1px); box-shadow: 0 20px 44px -16px rgba(255,255,255,0.5), inset 0 1px 0 rgba(255,255,255,0.95); }
+    .cta-primary:active { transform: scale(0.98); }
+
+    /* Secondary CTA: glass pill */
+    .cta-glass {
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.10);
+      color: #d4d4d8;
+    }
+    .cta-glass:hover { background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.22); color: #ffffff; }
+
+    .radial-glow-lime { background: radial-gradient(circle at 50% 50%, rgba(212,255,0,0.14) 0%, rgba(212,255,0,0) 68%); }
+    .radial-glow-cobalt { background: radial-gradient(circle at 50% 50%, rgba(37,99,235,0.16) 0%, rgba(37,99,235,0) 68%); }
+    .radial-glow-amber { background: radial-gradient(circle at 50% 50%, rgba(255,85,0,0.16) 0%, rgba(255,85,0,0) 68%); }
+
+    /* Stroboscopic gate */
+    .strobe-mask {
+      position: absolute;
+      inset: 0;
+      overflow: hidden;
+      -webkit-mask-image: linear-gradient(90deg, transparent, #000 10%, #000 90%, transparent);
+      mask-image: linear-gradient(90deg, transparent, #000 10%, #000 90%, transparent);
+    }
+    #strobeTrack { display: flex; gap: 6px; height: 100%; will-change: transform; }
+    .strobe-bar { flex: 0 0 auto; width: 4px; height: 100%; border-radius: 2px; background: rgba(255,255,255,0.16); transition: background .4s var(--ease); }
+    .strobe-lock .strobe-bar { background: rgba(212,255,0,0.5); }
+
+    /* Range inputs */
+    input[type=range] { -webkit-appearance: none; appearance: none; background: transparent; width: 100%; height: 18px; cursor: pointer; }
+    input[type=range]::-webkit-slider-runnable-track {
+      height: 6px; border-radius: 999px;
+      background: linear-gradient(90deg, rgba(255,85,0,0.45), rgba(255,255,255,0.12) 50%, rgba(212,255,0,0.45));
+      border: 1px solid rgba(255,255,255,0.08);
+    }
+    input[type=range]::-webkit-slider-thumb {
+      -webkit-appearance: none; width: 16px; height: 16px; margin-top: -6px; border-radius: 999px;
+      background: #fff; border: 3px solid #07080a;
+      box-shadow: 0 0 0 1px rgba(255,255,255,0.3), 0 6px 16px -6px rgba(0,0,0,0.9);
+    }
+    input[type=range]::-moz-range-track { height: 6px; border-radius: 999px; background: rgba(255,255,255,0.12); }
+    input[type=range]::-moz-range-thumb { width: 16px; height: 16px; border-radius: 999px; background: #fff; border: 3px solid #07080a; }
+
+    .panel-in { animation: panelIn .55s var(--ease) both; }
+    @keyframes panelIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+
+    /* Native full-screen mode */
+    body.native-full #deskHeader,
+    body.native-full #editorialRail { display: none !important; }
+    body.native-full #presentationWrap { padding: 0 !important; gap: 0 !important; max-width: none !important; }
+    body.native-full #appChassis {
+      width: 100% !important;
+      height: 100dvh !important;
+      max-height: none !important;
+      border-radius: 0 !important;
+      border: none !important;
+      box-shadow: none !important;
+    }
+    body.native-full #nativeExitBtn { display: flex !important; }
+
+    /* --- Container-query responsive interior: adapts to chassis width --- */
+    .app-shell { container-type: inline-size; }
+
+    .app-shell .cq-h2 { font-size: 2.1rem; line-height: 0.95; letter-spacing: -0.035em; }
+    .app-shell .cq-note { font-size: 3.25rem; line-height: 0.9; letter-spacing: -0.045em; }
+    .app-shell .cq-hero-grid { display: grid; grid-template-columns: 1fr; gap: 1.25rem; align-items: center; }
+    .app-shell .cq-metrics { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 0.625rem; }
+    .app-shell .cq-notes { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 0.4rem; }
+    .app-shell .cq-gauge { height: 156px; }
+    .app-shell .cq-section-gap > * + * { margin-top: 1.25rem; }
+    .app-shell .cq-strings { gap: 0.5rem; }
+
+    @container (min-width: 680px) {
+      .app-shell .cq-h2 { font-size: 3.4rem; }
+      .app-shell .cq-note { font-size: 5rem; }
+      .app-shell .cq-hero-grid { grid-template-columns: 5fr 7fr; gap: 2.5rem; }
+      .app-shell .cq-metrics { grid-template-columns: repeat(4, minmax(0,1fr)); gap: 1rem; }
+      .app-shell .cq-notes { grid-template-columns: repeat(6, minmax(0,1fr)); }
+      .app-shell .cq-gauge { height: 210px; }
+      .app-shell .cq-section-gap > * + * { margin-top: 2.25rem; }
+      .app-shell .cq-strings { gap: 1rem; }
+    }
+  </style>
+</head>
+
+<body class="bg-void text-zinc-200 antialiased font-sans min-h-screen flex flex-col relative overflow-x-hidden selection:bg-high-voltage selection:text-void">
+
+  <!-- Volumetric radiance backdrops -->
+  <div class="fixed top-[-14%] left-[18%] w-[560px] h-[560px] bg-high-voltage/[0.07] blur-[150px] rounded-full pointer-events-none -z-10 animate-float-slow"></div>
+  <div class="fixed bottom-[-16%] right-[10%] w-[620px] h-[620px] bg-electric-cobalt/[0.10] blur-[170px] rounded-full pointer-events-none -z-10"></div>
+  <div class="fixed top-[34%] right-[28%] w-[380px] h-[380px] bg-solar-amber/[0.05] blur-[140px] rounded-full pointer-events-none -z-10"></div>
+  <div class="fixed inset-0 bg-grid opacity-40 pointer-events-none -z-10"></div>
+  <div class="fixed inset-0 pointer-events-none -z-10" style="background: radial-gradient(120% 80% at 50% -10%, rgba(255,255,255,0.04), transparent 55%);"></div>
+
+  <!-- DESKTOP PRESENTATION TELEMETRY BAR -->
+  <header id="deskHeader" class="hidden md:flex w-full max-w-[1560px] mx-auto items-center justify-between gap-6 px-6 lg:px-10 py-5 border-b border-white/[0.06]">
+    <div class="flex items-center gap-3">
+      <span class="relative flex w-2.5 h-2.5">
+        <span class="animate-ping-slow absolute inline-flex h-full w-full rounded-full bg-high-voltage/60"></span>
+        <span class="relative inline-flex rounded-full w-2.5 h-2.5 bg-high-voltage"></span>
+      </span>
+      <span class="font-display font-black tracking-tighter text-lg text-white">EASY <span class="font-editorial italic font-medium text-zinc-400">Violin</span></span>
+      <span class="micro text-zinc-500 hidden lg:inline">INTONATION ENGINE · v4.3 · 48 kHz</span>
+    </div>
+
+    <div class="flex items-center gap-6">
+      <div class="hidden lg:flex items-center gap-6 font-mono text-[11px]">
+        <span class="text-zinc-500">РЕЖИМ <span id="topBarModeIndicator" class="text-high-voltage font-semibold">ТЮНЕР</span></span>
+        <span class="text-zinc-500">ЭТАЛОН <span class="text-zinc-200 font-semibold">A4 = <span id="deskConcertPitch">440.0</span> Hz</span></span>
+        <span class="micro text-zinc-600">LATENCY · 8 ms</span>
+      </div>
+      <button id="toggleChassisBtn" class="btn-haptic cta-glass rounded-full px-4 py-2 font-mono text-[11px] flex items-center gap-2">
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"/></svg>
+        <span>ШАССИ / ЭКРАН</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Exit affordance shown only in native fullscreen -->
+  <button id="nativeExitBtn" class="hidden fixed top-5 right-5 z-[60] btn-haptic cta-glass rounded-full px-4 py-2 font-mono text-[11px] items-center gap-2">
+    <span class="text-high-voltage">←</span> В ШАССИ
+  </button>
+
+  <!-- PRESENTATION WRAPPER: editorial rail + device chassis -->
+  <div id="presentationWrap" class="flex-1 w-full max-w-[1560px] mx-auto flex items-center justify-center gap-10 xl:gap-20 px-4 lg:px-10 py-8 lg:py-14">
+
+    <!-- EDITORIAL RAIL (desktop counterweight / negative space) -->
+    <aside id="editorialRail" class="hidden xl:flex flex-col justify-center w-full max-w-[430px] shrink-0">
+      <span class="micro text-high-voltage flex items-center gap-3">
+        <span class="w-8 h-px bg-high-voltage/60"></span>АКУСТИЧЕСКАЯ ТОЧНОСТЬ
+      </span>
+
+      <h2 class="font-display font-black tracking-tighter leading-[0.9] text-5xl xl:text-[3.75rem] text-white mt-7">
+        Слышать <span class="font-editorial italic font-normal text-zinc-400">каждую</span> центовую долю
+      </h2>
+
+      <p class="font-sans text-[15px] leading-relaxed text-zinc-400 mt-7 max-w-md">
+        Детектор интонации, который ведёт смычок по струне в реальном времени: стробоскоп, дуга центов
+        и подсказка колка — до того, как фальшь услышит зал.
+      </p>
+
+      <div class="grid grid-cols-2 gap-3 mt-10">
+        <div class="glass-card rounded-2xl p-4">
+          <div class="micro text-zinc-500">ТОЧНОСТЬ</div>
+          <div class="font-display font-black text-3xl text-white mt-2 tracking-tighter">±1<span class="text-high-voltage">¢</span></div>
+          <div class="micro text-zinc-600 mt-1">КЛАСС ДЕТЕКЦИИ</div>
+        </div>
+        <div class="glass-card rounded-2xl p-4">
+          <div class="micro text-zinc-500">ЭТАЛОН</div>
+          <div class="font-display font-black text-3xl text-white mt-2 tracking-tighter">440<span class="text-high-voltage text-sm">Hz</span></div>
+          <div class="micro text-zinc-600 mt-1">КОНЦЕРТНЫЙ СТРОЙ</div>
+        </div>
+        <div class="glass-card rounded-2xl p-5 col-span-2 flex items-center justify-between gap-4">
+          <div>
+            <div class="micro text-zinc-500">МАТЕРИАЛ</div>
+            <div class="font-display font-black text-2xl text-white mt-2 tracking-tighter">8 <span class="text-high-voltage text-sm">тональностей</span></div>
+            <div class="micro text-zinc-600 mt-1">G3 → A5 · СМЫЧОК · СТРУНЫ</div>
+          </div>
+          <svg viewBox="0 0 130 52" class="w-32 h-12 text-high-voltage/70 shrink-0" aria-hidden="true">
+            <path d="M1 26 q 11 -24 22 0 t 22 0 t 22 0 t 22 0 t 22 0" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+          </svg>
+        </div>
+      </div>
+
+      <div class="flex items-center gap-3 mt-10">
+        <button id="railLaunchBtn" class="cta-primary btn-haptic rounded-full px-6 py-3.5 font-mono text-[11px] font-bold tracking-widest flex items-center gap-2">
+          ЗАПУСТИТЬ ДЕТЕКТОР <span class="text-base leading-none">↗</span>
+        </button>
+        <button id="railNativeBtn" class="cta-glass btn-haptic rounded-full px-6 py-3.5 font-mono text-[11px] flex items-center gap-2">
+          <span id="railNativeLabel">ВО ВЕСЬ ЭКРАН</span> <span class="text-base leading-none">↗</span>
+        </button>
+      </div>
+    </aside>
+
+    <!-- DEVICE CHASSIS -->
+    <main id="appChassis" class="w-full h-[100dvh] md:w-[414px] md:h-[860px] bg-obsidian md:rounded-[52px] md:border-[9px] md:border-zinc-800/70 md:ring-1 md:ring-white/10 shadow-[0_40px_120px_-40px_rgba(0,0,0,0.95)] flex flex-col relative overflow-hidden transition-all duration-700 ease-[cubic-bezier(0.16,1,0.3,1)]">
+
+      <!-- Status bar + Dynamic Island -->
+      <div class="w-full pt-3 pb-2.5 px-6 flex items-center justify-between z-30 select-none border-b border-white/[0.05] bg-obsidian/80 backdrop-blur-xl">
+        <span id="clockElement" class="font-mono text-[11px] font-semibold text-zinc-300 tracking-wider">09:41</span>
+
+        <div class="h-7 w-28 rounded-full bg-graphite border border-white/[0.08] flex items-center justify-between px-3" title="DSP ядро">
+          <div class="flex items-center gap-1.5">
+            <span id="dynamicIslandDot" class="w-1.5 h-1.5 rounded-full bg-high-voltage animate-pulse"></span>
+            <span class="font-mono text-[9px] tracking-[0.2em] text-zinc-400">DSP</span>
+          </div>
+          <div class="flex items-end gap-[3px] h-3">
+            <span class="w-[2px] h-2 bg-high-voltage rounded-full animate-bounce" style="animation-delay:.1s"></span>
+            <span class="w-[2px] h-3 bg-high-voltage rounded-full animate-bounce" style="animation-delay:.25s"></span>
+            <span class="w-[2px] h-1.5 bg-high-voltage rounded-full animate-bounce" style="animation-delay:.4s"></span>
+          </div>
+        </div>
+
+        <div class="flex items-center gap-1.5 text-zinc-300 font-mono text-[10px]">
+          <span>5G</span>
+          <span class="border border-white/20 rounded-[5px] px-1.5 py-0.5 flex items-center gap-1">
+            <span class="text-[8px] leading-none">100%</span>
+            <span class="w-3 h-2 bg-zinc-300 rounded-[2px] inline-block"></span>
+          </span>
+        </div>
+      </div>
+
+      <!-- App header -->
+      <div class="px-5 pt-3.5 pb-3 flex items-center justify-between gap-3 border-b border-white/[0.05] z-20">
+        <div class="min-w-0">
+          <div class="flex items-center gap-2">
+            <span class="micro text-zinc-500">АКУСТИЧЕСКАЯ СКРИПКА</span>
+            <span class="inline-flex items-center gap-1 px-2 py-[3px] rounded-full text-[9px] font-mono font-medium bg-high-voltage/10 text-high-voltage border border-high-voltage/25">
+              A4 <span id="concertPitchBadge">440.0</span> Hz
+            </span>
+          </div>
+          <h1 class="font-display font-black tracking-tighter leading-[0.95] text-xl text-white flex items-baseline gap-1.5 mt-1">
+            EASY<span class="font-editorial italic font-medium text-zinc-400 text-[1.05em]">Violin</span>
+            <span class="w-1.5 h-1.5 rounded-full bg-high-voltage inline-block"></span>
+          </h1>
+        </div>
+
+        <div class="flex items-center gap-2 shrink-0">
+          <button id="micToggleBtn" aria-label="Микрофон" class="btn-haptic flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-mono font-semibold border border-white/10 bg-white/[0.03] text-zinc-300 hover:border-high-voltage/50">
+            <span id="micStatusDot" class="w-2 h-2 rounded-full bg-zinc-600 transition-colors"></span>
+            <span id="micStatusText">MIC OFF</span>
+          </button>
+
+          <button id="calibrateBtn" aria-label="Калибровка эталона Ля" class="btn-haptic w-8 h-8 rounded-full border border-white/10 bg-white/[0.03] flex items-center justify-center text-zinc-300 hover:text-white hover:border-white/30">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- Bow scratch warning (reactive) -->
+      <div id="scratchWarningBanner" class="hidden px-4 py-2 bg-crimson-scratch/10 border-b border-crimson-scratch/30 items-center justify-between z-20">
+        <div class="flex items-center gap-2">
+          <svg class="w-4 h-4 text-crimson-scratch animate-pulse" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+          <span class="micro text-red-200 font-semibold">СКРИП СМЫЧКА // ОСЛАБЬТЕ ПРИЖИМ</span>
+        </div>
+        <span class="font-mono text-[9px] text-red-400">SCRATCH</span>
+      </div>
+
+      <!-- SCROLLABLE APP VIEWPORT -->
+      <div id="screenContainer" class="app-shell flex-1 overflow-y-auto overflow-x-hidden relative px-4 py-5">
+
+        <!-- =========================================================== -->
+        <!-- TAB 1 · TUNER -->
+        <!-- =========================================================== -->
+        <section id="tabTuner" class="cq-section-gap">
+
+          <!-- MODE SWITCHER -->
+          <div class="glass-card rounded-2xl p-1.5 grid grid-cols-2 gap-1.5 select-none" role="tablist" aria-label="Режим тюнера">
+            <button id="modeTunerBtn" class="btn-haptic py-2.5 px-3 rounded-xl font-mono text-[11px] font-bold flex items-center justify-center gap-2 bg-high-voltage text-void shadow-[0_0_22px_rgba(212,255,0,0.28)]">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+              <span>ТЮНЕР</span>
+            </button>
+            <button id="modeAccuracyBtn" class="btn-haptic py-2.5 px-3 rounded-xl font-mono text-[11px] font-semibold text-zinc-400 hover:text-white flex items-center justify-center gap-2">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 2a10 10 0 100 20 10 10 0 000-20zm0 0v20M2 12h20"/></svg>
+              <span>ТОЧНОСТЬ</span>
+            </button>
+          </div>
+
+          <!-- Editorial spine -->
+          <div class="flex items-end justify-between gap-4">
+            <div>
+              <span class="micro text-zinc-500 flex items-center gap-2">
+                <span id="modeDot" class="w-1.5 h-1.5 rounded-full bg-high-voltage animate-ping-slow"></span>
+                <span id="modeHeading">ДЕТЕКТОР НОТЫ</span>
+              </span>
+              <h2 class="cq-h2 font-display font-black tracking-tighter text-white mt-3">
+                Строй <span class="font-editorial italic font-normal text-zinc-400">в реальном времени</span>
+              </h2>
+            </div>
+            <span class="micro text-zinc-600 text-right hidden sm:block">v4.3<br>48 kHz</span>
+          </div>
+
+          <!-- STRING SELECTORS -->
+          <div id="stringComparisonRow" class="cq-strings grid grid-cols-4">
+            <button data-string="G" onclick="selectString('G')" class="string-btn btn-haptic glass-card rounded-2xl px-2 py-3 flex flex-col items-center gap-2 border-white/[0.08]">
+              <span class="w-8 h-8 rounded-full bg-purple-400/15 border border-purple-400/30 grid place-items-center"><span class="w-5 h-5 rounded-full bg-purple-400/40 border border-purple-400/70"></span></span>
+              <span class="string-label font-mono text-[9px] tracking-wider uppercase text-zinc-400">Соль G3</span>
+            </button>
+            <button data-string="D" onclick="selectString('D')" class="string-btn btn-haptic glass-card rounded-2xl px-2 py-3 flex flex-col items-center gap-2 border-white/[0.08]">
+              <span class="w-8 h-8 rounded-full bg-blue-400/15 border border-blue-400/30 grid place-items-center"><span class="w-5 h-5 rounded-full bg-blue-400/40 border border-blue-400/70"></span></span>
+              <span class="string-label font-mono text-[9px] tracking-wider uppercase text-zinc-400">Ре D4</span>
+            </button>
+            <button data-string="A" onclick="selectString('A')" class="string-btn btn-haptic glass-card rounded-2xl px-2 py-3 flex flex-col items-center gap-2 border-white/[0.08]">
+              <span class="w-8 h-8 rounded-full bg-high-voltage/15 border border-high-voltage/30 grid place-items-center"><span class="w-5 h-5 rounded-full bg-high-voltage/40 border border-high-voltage/70"></span></span>
+              <span class="string-label font-mono text-[9px] tracking-wider uppercase text-zinc-400">Ля A4</span>
+            </button>
+            <button data-string="E" onclick="selectString('E')" class="string-btn btn-haptic glass-card rounded-2xl px-2 py-3 flex flex-col items-center gap-2 border-white/[0.08]">
+              <span class="w-8 h-8 rounded-full bg-amber-400/15 border border-amber-400/30 grid place-items-center"><span class="w-5 h-5 rounded-full bg-amber-400/40 border border-amber-400/70"></span></span>
+              <span class="string-label font-mono text-[9px] tracking-wider uppercase text-zinc-400">Ми E5</span>
+            </button>
+          </div>
+
+          <!-- HERO: intonation gauge -->
+          <article class="glass-card rounded-[28px] p-5 relative overflow-hidden">
+            <div id="tunerGlow" class="absolute -top-1/2 -left-1/3 w-[130%] h-[130%] radial-glow-amber opacity-60 transition-opacity duration-700 pointer-events-none"></div>
+
+            <div class="relative z-10 flex items-center justify-between gap-3">
+              <span class="inline-flex items-center gap-2 px-2.5 py-1 rounded-full border border-white/10 bg-white/[0.03]">
+                <span class="w-1.5 h-1.5 rounded-full bg-solar-amber animate-pulse"></span>
+                <span class="micro text-zinc-300">ЖИВОЙ СИГНАЛ</span>
+              </span>
+              <div class="flex items-center gap-3 font-mono">
+                <div class="text-right">
+                  <div class="micro text-zinc-500">ФАКТ</div>
+                  <div id="currentHz" class="text-[11px] font-bold text-zinc-100">309.3 Hz</div>
+                </div>
+                <div class="w-px h-7 bg-white/10"></div>
+                <div class="text-right">
+                  <div class="micro text-high-voltage/70">ЦЕЛЬ</div>
+                  <div id="targetHzDisplay" class="text-[11px] font-bold text-high-voltage">311.1 Hz</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="cq-hero-grid relative z-10 mt-4">
+              <!-- Note spine (left-aligned) -->
+              <div class="flex flex-col items-start">
+                <span class="micro text-zinc-500">ТЕКУЩАЯ НОТА</span>
+                <div class="flex items-baseline gap-2 mt-1">
+                  <span id="noteRussian" class="cq-note font-display font-black text-white">Ре#</span>
+                  <span id="noteOctave" class="font-mono text-2xl text-zinc-500 font-bold">4</span>
+                </div>
+                <div class="mt-2 flex items-baseline gap-3">
+                  <span id="centsDisplay" class="font-mono text-3xl font-black tracking-tight text-solar-amber">-10¢</span>
+                  <span id="noteCodeDisplay" class="micro text-zinc-600">D#4</span>
+                </div>
+                <p id="statusSubLabel" class="font-sans text-xs text-zinc-400 mt-2 leading-relaxed">Низит на 10¢ относительно D#4 (311.1 Гц)</p>
+              </div>
+
+              <!-- Arc gauge (right) -->
+              <div class="relative w-full">
+                <svg viewBox="0 0 240 150" class="w-full cq-gauge" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Дуга центов от -50 до +50">
+                  <defs>
+                    <filter id="needleGlow" x="-40%" y="-40%" width="180%" height="180%">
+                      <feGaussianBlur stdDeviation="2.2" result="b"/>
+                      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+                    </filter>
+                  </defs>
+                  <path d="M 28 118 A 92 92 0 0 1 212 118" fill="none" stroke="rgba(255,255,255,0.10)" stroke-width="6" stroke-linecap="round"/>
+                  <path d="M 111.3 26.4 A 92 92 0 0 1 128.7 26.4" fill="none" stroke="rgba(212,255,0,0.6)" stroke-width="6" stroke-linecap="round"/>
+                  <g id="centGaugeTicks"></g>
+                  <g id="centNeedle" filter="url(#needleGlow)">
+                    <line id="centNeedleLine" x1="120" y1="118" x2="120" y2="46" stroke="#FF5500" stroke-width="3" stroke-linecap="round"/>
+                    <circle id="centBall" cx="120" cy="44" r="5.5" fill="#FF5500" stroke="#07080a" stroke-width="2"/>
+                  </g>
+                  <circle cx="120" cy="118" r="7" fill="#151823" stroke="rgba(255,255,255,0.18)" stroke-width="1.5"/>
+                </svg>
+                <div class="mt-1 flex justify-between px-2 font-mono text-[9px] text-zinc-500 select-none">
+                  <span>-50¢</span><span>-25¢</span><span class="text-high-voltage font-bold">0¢</span><span>+25¢</span><span>+50¢</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Staff notation: target vs detected pitch -->
+            <div class="relative z-10 mt-3">
+              <svg viewBox="0 0 370 110" class="w-full h-[92px]" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Нотный стан: цель и фактическая нота">
+                <line x1="20" y1="20" x2="350" y2="20" stroke="rgba(255,255,255,0.30)" stroke-width="1"/>
+                <line x1="20" y1="30" x2="350" y2="30" stroke="rgba(255,255,255,0.30)" stroke-width="1"/>
+                <line x1="20" y1="40" x2="350" y2="40" stroke="rgba(255,255,255,0.30)" stroke-width="1"/>
+                <line x1="20" y1="50" x2="350" y2="50" stroke="rgba(255,255,255,0.30)" stroke-width="1"/>
+                <line x1="20" y1="60" x2="350" y2="60" stroke="rgba(255,255,255,0.30)" stroke-width="1"/>
+                <text x="28" y="48" fill="rgba(255,255,255,0.45)" font-size="28" font-family="serif" font-style="italic">𝄞</text>
+                <ellipse id="staffPlayedNote" cx="250" cy="38" rx="6.5" ry="5" fill="rgba(255,85,0,0.4)" stroke="#FF5500" stroke-width="1.5"/>
+                <text id="staffPlayedAccidental" x="236" y="43" fill="#FF5500" font-size="12" font-family="serif" text-anchor="end">#</text>
+                <text id="staffPlayedLabel" x="250" y="90" fill="rgba(255,85,0,0.85)" font-size="7" font-family="monospace" text-anchor="middle">Ре (факт)</text>
+                <ellipse id="staffTargetNote" cx="150" cy="38" rx="7" ry="5.5" fill="rgba(212,255,0,0.75)" stroke="#D4FF00" stroke-width="1.5"/>
+                <text id="staffTargetAccidental" x="136" y="43" fill="#D4FF00" font-size="12" font-family="serif" text-anchor="end">#</text>
+                <text id="staffTargetLabel" x="150" y="84" fill="#D4FF00" font-size="7" font-family="monospace" text-anchor="middle">Ре#4</text>
+              </svg>
+              <div class="mt-1 flex items-center justify-between font-mono text-[9px] text-zinc-600">
+                <span class="text-high-voltage/80">■ ЦЕЛЬ</span>
+                <span class="text-solar-amber/90">■ ДЕТЕКЦИЯ</span>
+              </div>
+            </div>
+
+            <!-- Stroboscope gate -->
+            <div id="strobeWrap" class="relative z-10 mt-4 h-9 rounded-xl overflow-hidden border border-white/[0.06] bg-[#0c0e14]">
+              <div class="strobe-mask"><div id="strobeTrack"></div></div>
+              <div class="absolute inset-0 flex items-center justify-center pointer-events-none">
+                <div class="w-px h-full bg-high-voltage/60 shadow-[0_0_14px_#D4FF00]"></div>
+              </div>
+            </div>
+            <div class="relative z-10 mt-2 flex items-center justify-between micro text-zinc-600">
+              <span>СТРОБОСКОП</span>
+              <span id="strobeState">РАСХОЖДЕНИЕ</span>
+            </div>
+
+            <!-- Oscilloscope -->
+            <div class="relative z-10 mt-4 rounded-2xl border border-white/[0.06] bg-[#0c0e14]/70 overflow-hidden h-16">
+              <canvas id="audioWaveformCanvas" class="absolute inset-0 w-full h-full opacity-70"></canvas>
+              <span class="absolute top-2 left-3 micro text-zinc-600 pointer-events-none">ОСЦИЛЛОГРАФ</span>
+            </div>
+
+            <!-- Guidance pill -->
+            <div class="relative z-10 mt-5 pt-4 border-t border-white/[0.07] flex items-center justify-between gap-3 flex-wrap">
+              <div id="guidancePill" class="px-4 py-2 rounded-full font-mono text-[11px] font-bold tracking-wider uppercase flex items-center gap-2 bg-solar-amber text-void shadow-[0_0_24px_rgba(255,85,0,0.35)] transition-all duration-300">
+                <svg id="guidanceIcon" class="w-3.5 h-3.5 transition-transform duration-300" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 10l7-7m0 0l7 7m-7-7v18"/></svg>
+                <span id="guidanceText">НАТЯНУТЬ ↗</span>
+              </div>
+              <div class="text-right">
+                <div class="micro text-zinc-600">УВЕРЕННОСТЬ</div>
+                <div id="confidenceText" class="font-mono text-xs font-bold text-zinc-100">94.0%</div>
+              </div>
+            </div>
+          </article>
+
+          <!-- BENTO ASYMMETRIC METRICS -->
+          <div class="cq-metrics">
+            <article class="glass-card rounded-2xl p-4 col-span-2">
+              <div class="flex items-center justify-between">
+                <span class="micro text-zinc-500">ДАВЛЕНИЕ СМЫЧКА</span>
+                <span id="bowPressureLabel" class="font-mono text-[11px] font-bold text-emerald-400">65%</span>
+              </div>
+              <div class="mt-3 h-1.5 rounded-full bg-white/[0.07] overflow-hidden">
+                <div id="bowPressureBar" class="h-full bg-emerald-400 transition-all duration-500 ease-out w-[65%]"></div>
+              </div>
+              <input id="bowPressureSlider" type="range" min="0" max="100" value="65" aria-label="Давление смычка" class="mt-3">
+            </article>
+
+            <article class="glass-card rounded-2xl p-4">
+              <div class="micro text-zinc-500">ГЛАДКОСТЬ</div>
+              <div class="flex items-baseline gap-1 mt-2">
+                <span id="smoothnessLabel" class="font-display font-black text-2xl text-white tracking-tighter">89%</span>
+              </div>
+              <div class="mt-2 h-1.5 rounded-full bg-white/[0.07] overflow-hidden">
+                <div id="smoothnessBar" class="h-full bg-electric-cobalt transition-all duration-500 ease-out w-[89%]"></div>
+              </div>
+            </article>
+
+            <article class="glass-card rounded-2xl p-4">
+              <div class="micro text-zinc-500">СТРУНА</div>
+              <div id="activeStringSpec" class="font-display font-bold text-sm text-white mt-2 tracking-tight">Ля (A)</div>
+              <div id="activeStringHz" class="micro text-high-voltage mt-1">440.0 Hz</div>
+            </article>
+          </div>
+
+          <!-- SIMULATION BENCH -->
+          <article class="glass-card rounded-[28px] p-5">
+            <div class="flex items-center justify-between">
+              <div>
+                <span class="micro text-zinc-500">СИМУЛЯТОР</span>
+                <h3 class="font-display font-bold text-base text-white tracking-tight mt-1">Быстрые ноты</h3>
+              </div>
+              <span class="micro text-high-voltage">TEST HARMONICS</span>
+            </div>
+
+            <div class="cq-notes mt-4">
+              <button onclick="simulateBowNote('До','C4',261.63,0)" class="test-note-btn btn-haptic py-2 rounded-xl bg-white/[0.03] border border-white/[0.08] font-mono text-xs font-semibold text-zinc-300 hover:border-white/25">До</button>
+              <button onclick="simulateBowNote('Ре','D4',293.66,0)" class="test-note-btn btn-haptic py-2 rounded-xl bg-white/[0.03] border border-white/[0.08] font-mono text-xs font-semibold text-zinc-300 hover:border-white/25">Ре</button>
+              <button onclick="simulateBowNote('Ре#','D#4',311.10,-10)" class="test-note-btn btn-haptic py-2 rounded-xl bg-solar-amber/15 border border-solar-amber/40 font-mono text-xs font-bold text-solar-amber">Ре#</button>
+              <button onclick="simulateBowNote('Ми','E4',329.63,0)" class="test-note-btn btn-haptic py-2 rounded-xl bg-white/[0.03] border border-white/[0.08] font-mono text-xs font-semibold text-zinc-300 hover:border-white/25">Ми</button>
+              <button onclick="simulateBowNote('Фа#','F#4',369.99,4)" class="test-note-btn btn-haptic py-2 rounded-xl bg-white/[0.03] border border-white/[0.08] font-mono text-xs font-semibold text-zinc-300 hover:border-white/25">Фа#</button>
+              <button onclick="simulateBowNote('Ля','A4',440.00,0)" class="test-note-btn btn-haptic py-2 rounded-xl bg-white/[0.03] border border-white/[0.08] font-mono text-xs font-semibold text-zinc-300 hover:border-white/25">Ля</button>
+            </div>
+
+            <div class="mt-5">
+              <div class="flex justify-between micro">
+                <span class="text-zinc-500">СДВИГ ИНТОНАЦИИ</span>
+                <span id="sliderCentsLabel" class="text-zinc-100">-10¢</span>
+              </div>
+              <input id="pitchSimulatorSlider" type="range" min="-45" max="45" value="-10" aria-label="Сдвиг интонации" class="mt-2">
+              <div class="mt-1 flex justify-between font-mono text-[9px] text-zinc-600">
+                <span>НИЗИТ −45¢</span><span>ИДЕАЛ 0¢</span><span>ВЫСИТ +45¢</span>
+              </div>
+            </div>
+          </article>
+        </section>
+
+        <!-- =========================================================== -->
+        <!-- TAB 2 · SCALES / TRAINER -->
+        <!-- =========================================================== -->
+        <section id="tabTrainer" class="cq-section-gap hidden">
+
+          <div class="flex items-end justify-between gap-4">
+            <div>
+              <span class="micro text-zinc-500">ТРЕНИРОВКА</span>
+              <h2 class="cq-h2 font-display font-black tracking-tighter text-white mt-3">
+                Гаммы <span class="font-editorial italic font-normal text-zinc-400">и техника</span>
+              </h2>
+            </div>
+            <span class="inline-flex items-center gap-2 px-2.5 py-1 rounded-full border border-white/10 bg-white/[0.03] shrink-0">
+              <span class="w-1.5 h-1.5 rounded-full bg-high-voltage animate-ping-slow"></span>
+              <span class="micro text-zinc-300">СЕРИЯ · <span id="scaleStreakCounter">7 НОТ</span></span>
+            </span>
+          </div>
+
+          <!-- Scale selector -->
+          <article class="glass-card rounded-[24px] p-4">
+            <div class="flex items-center justify-between gap-3">
+              <span class="micro text-zinc-500">ТОНАЛЬНОСТЬ</span>
+              <span id="activeScaleBadge" class="font-mono text-[10px] text-high-voltage font-bold text-right">РЕ МАЖОР · 2#</span>
+            </div>
+            <div class="mt-3 overflow-x-auto -mx-1 px-1 pb-1">
+              <div id="scaleScrollbar" class="flex items-center gap-2 min-w-max"></div>
+            </div>
+          </article>
+
+          <!-- Scale hero -->
+          <article class="glass-card rounded-[28px] p-5 relative overflow-hidden">
+            <div class="absolute -top-1/3 -left-1/4 w-[130%] h-[130%] radial-glow-lime opacity-40 pointer-events-none"></div>
+
+            <div class="relative z-10 flex items-start justify-between gap-4">
+              <div>
+                <span class="micro text-zinc-500">СЫГРАЙТЕ НОТУ</span>
+                <div class="flex items-baseline gap-2 mt-1">
+                  <span id="targetScaleNoteRussian" class="cq-note font-display font-black text-white">Фа#</span>
+                  <span id="targetScaleOctave" class="font-mono text-2xl text-high-voltage font-bold">4</span>
+                </div>
+              </div>
+              <div class="text-right space-y-1.5 shrink-0">
+                <div class="micro text-zinc-500">ШАГ <span id="stepProgressText" class="text-high-voltage font-bold">3 / 8</span></div>
+                <div id="bowDirectionBadge" class="inline-flex px-2.5 py-1 rounded-full border border-white/10 bg-white/[0.03] font-mono text-[9px] text-zinc-300">↓ Смычок вниз</div>
+                <div id="keySigDisplay" class="block font-mono text-[9px] text-zinc-500">2 диеза (Фа#, До#)</div>
+              </div>
+            </div>
+
+            <div class="relative z-10 mt-3">
+              <svg viewBox="0 0 370 110" class="w-full h-[100px]" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Нотный стан гаммы">
+                <line x1="20" y1="20" x2="350" y2="20" stroke="rgba(255,255,255,0.30)" stroke-width="1"/>
+                <line x1="20" y1="30" x2="350" y2="30" stroke="rgba(255,255,255,0.30)" stroke-width="1"/>
+                <line x1="20" y1="40" x2="350" y2="40" stroke="rgba(255,255,255,0.30)" stroke-width="1"/>
+                <line x1="20" y1="50" x2="350" y2="50" stroke="rgba(255,255,255,0.30)" stroke-width="1"/>
+                <line x1="20" y1="60" x2="350" y2="60" stroke="rgba(255,255,255,0.30)" stroke-width="1"/>
+                <text x="28" y="48" fill="rgba(255,255,255,0.45)" font-size="28" font-family="serif" font-style="italic">𝄞</text>
+                <text id="keySigAccidentals" x="62" y="38" fill="#D4FF00" font-size="12" font-family="serif">##</text>
+                <ellipse id="trainerPlayedNote" cx="250" cy="50" rx="6.5" ry="5" fill="rgba(255,85,0,0.35)" stroke="rgba(255,85,0,0.7)" stroke-width="1.5"/>
+                <text id="trainerPlayedAccidental" x="236" y="55" fill="#FF5500" font-size="12" font-family="serif" opacity="0"></text>
+                <text id="trainerPlayedLabel" x="250" y="90" fill="rgba(255,85,0,0.75)" font-size="7" font-family="monospace" text-anchor="middle">ПРЕД.</text>
+                <ellipse id="trainerTargetNote" cx="150" cy="38" rx="7" ry="5.5" fill="rgba(212,255,0,0.75)" stroke="#D4FF00" stroke-width="1.5"/>
+                <text id="trainerTargetAccidental" x="136" y="43" fill="#D4FF00" font-size="12" font-family="serif" text-anchor="end">#</text>
+                <text id="trainerTargetLabel" x="150" y="84" fill="#D4FF00" font-size="7" font-family="monospace" text-anchor="middle">Фа#4</text>
+              </svg>
+            </div>
+
+            <!-- Per-note spec bento -->
+            <div class="relative z-10 mt-3 grid grid-cols-3 gap-2">
+              <div class="rounded-xl border border-white/[0.07] bg-white/[0.02] p-2.5">
+                <div class="micro text-zinc-600">ПАЛЕЦ</div>
+                <div id="targetFingerInfo" class="font-mono text-[10px] text-zinc-200 mt-1 leading-snug">3-й палец</div>
+              </div>
+              <div class="rounded-xl border border-white/[0.07] bg-white/[0.02] p-2.5">
+                <div class="micro text-zinc-600">СТРУНА</div>
+                <div id="targetStringInfo" class="font-mono text-[10px] text-zinc-200 mt-1 leading-snug">Ре (D)</div>
+              </div>
+              <div class="rounded-xl border border-white/[0.07] bg-white/[0.02] p-2.5">
+                <div class="micro text-zinc-600">ЧАСТОТА</div>
+                <div id="targetHzInfo" class="font-mono text-[10px] text-high-voltage mt-1 leading-snug">369.99 Hz</div>
+              </div>
+            </div>
+
+            <!-- Step trail -->
+            <div class="relative z-10 mt-4 overflow-x-auto pb-1">
+              <div id="scaleStepsContainer" class="flex items-center gap-1.5 min-w-max"></div>
+            </div>
+
+            <!-- Purity + bow direction -->
+            <div class="relative z-10 mt-4 flex items-center gap-3 font-mono text-[10px] text-zinc-500">
+              <span class="micro text-zinc-600">ЧИСТОТА</span>
+              <div class="flex-1 h-1.5 rounded-full bg-white/[0.07] overflow-hidden">
+                <div id="trainerPurityBar" class="h-full bg-high-voltage transition-all duration-500 ease-out w-[72%]"></div>
+              </div>
+              <span id="trainerPurityLabel" class="text-high-voltage font-bold">72%</span>
+              <span id="trainerBowDirection" class="text-zinc-200 font-bold">↓ Вниз</span>
+            </div>
+
+            <!-- Train modes -->
+            <div class="relative z-10 mt-4 pt-4 border-t border-white/[0.07] overflow-x-auto">
+              <div class="flex items-center gap-2 min-w-max">
+                <button id="trainModeFixed" onclick="setTrainMode('fixed')" class="train-mode-btn btn-haptic px-2.5 py-1.5 rounded-full font-mono text-[9px]">♩ Фикс</button>
+                <button id="trainModeAccel" onclick="setTrainMode('accel')" class="train-mode-btn btn-haptic px-2.5 py-1.5 rounded-full font-mono text-[9px]">♩+ Ускорение</button>
+                <button id="trainModeSlur" onclick="setTrainMode('slur')" class="train-mode-btn btn-haptic px-2.5 py-1.5 rounded-full font-mono text-[9px]">🎵 Лигатура</button>
+                <button id="trainModeSplit" onclick="setTrainMode('split')" class="train-mode-btn btn-haptic px-2.5 py-1.5 rounded-full font-mono text-[9px]">✂ Дробление</button>
+                <button id="trainModeSkip" onclick="setTrainMode('skip')" class="train-mode-btn btn-haptic px-2.5 py-1.5 rounded-full font-mono text-[9px]">? Пропуск</button>
+                <button id="trainModeRandom" onclick="setTrainMode('random')" class="train-mode-btn btn-haptic px-2.5 py-1.5 rounded-full font-mono text-[9px]">🌀 Случайно</button>
+              </div>
+            </div>
+
+            <!-- Actions -->
+            <div class="relative z-10 mt-4 grid grid-cols-2 gap-2">
+              <button id="hearTargetNoteBtn" class="btn-haptic cta-glass rounded-full py-3 font-mono text-[11px] flex items-center justify-center gap-2">
+                <svg class="w-3.5 h-3.5 text-high-voltage" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z"/></svg>
+                <span>ЭТАЛОН</span>
+              </button>
+              <button id="trainerPlayBtn" class="btn-haptic cta-primary rounded-full py-3 font-mono text-[11px] font-bold flex items-center justify-center gap-1.5">
+                <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                <span>СТАРТ</span>
+              </button>
+            </div>
+          </article>
+        </section>
+
+        <!-- =========================================================== -->
+        <!-- TAB 3 · PIECES -->
+        <!-- =========================================================== -->
+        <section id="tabPieces" class="cq-section-gap hidden">
+
+          <div class="flex items-start justify-between gap-4">
+            <div>
+              <span class="micro text-zinc-500">РЕПЕРТУАР</span>
+              <h2 class="cq-h2 font-display font-black tracking-tighter text-white mt-3">
+                Произведения <span class="font-editorial italic font-normal text-zinc-400">на слух</span>
+              </h2>
+            </div>
+            <div class="flex items-center gap-1.5 shrink-0 mt-1">
+              <button onclick="adjustBpm(-2)" aria-label="Медленнее" class="btn-haptic cta-glass w-8 h-8 rounded-full grid place-items-center font-mono text-sm">−</button>
+              <span class="inline-flex items-center px-2.5 py-1 rounded-full border border-white/10 bg-white/[0.03]">
+                <span class="micro text-zinc-300">BPM <span id="bpmDisplay">72</span></span>
+              </span>
+              <button onclick="adjustBpm(2)" aria-label="Быстрее" class="btn-haptic cta-glass w-8 h-8 rounded-full grid place-items-center font-mono text-sm">+</button>
+            </div>
+          </div>
+
+          <!-- Active piece -->
+          <article class="glass-card rounded-[28px] p-5 relative overflow-hidden">
+            <div class="absolute -top-1/3 -right-1/4 w-[130%] h-[130%] radial-glow-cobalt opacity-50 pointer-events-none"></div>
+
+            <div class="relative z-10 flex items-start justify-between gap-4">
+              <div>
+                <span class="micro text-high-voltage">КНИГА 1 · ПЬЕСА 1</span>
+                <h3 class="font-display font-bold text-base text-white tracking-tight mt-1.5">Twinkle, Twinkle Little Star</h3>
+              </div>
+              <span class="w-9 h-9 rounded-2xl border border-white/10 bg-white/[0.03] grid place-items-center text-high-voltage shrink-0">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.6" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3"/></svg>
+              </span>
+            </div>
+
+            <div class="relative z-10 mt-3">
+              <svg viewBox="0 0 370 100" class="w-full h-[86px]" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Нотный стан произведения">
+                <line x1="20" y1="20" x2="350" y2="20" stroke="rgba(255,255,255,0.30)" stroke-width="1"/>
+                <line x1="20" y1="30" x2="350" y2="30" stroke="rgba(255,255,255,0.30)" stroke-width="1"/>
+                <line x1="20" y1="40" x2="350" y2="40" stroke="rgba(255,255,255,0.30)" stroke-width="1"/>
+                <line x1="20" y1="50" x2="350" y2="50" stroke="rgba(255,255,255,0.30)" stroke-width="1"/>
+                <line x1="20" y1="60" x2="350" y2="60" stroke="rgba(255,255,255,0.30)" stroke-width="1"/>
+                <text x="28" y="46" fill="rgba(255,255,255,0.45)" font-size="26" font-family="serif" font-style="italic">𝄞</text>
+                <text id="pieceKeySig" x="60" y="34" fill="#D4FF00" font-size="11" font-family="serif">##</text>
+                <ellipse id="pieceTargetNote" cx="150" cy="40" rx="7" ry="5.5" fill="rgba(212,255,0,0.75)" stroke="#D4FF00" stroke-width="1.5"/>
+                <text id="pieceNoteNameLabel" x="150" y="74" fill="#D4FF00" font-size="7" font-family="monospace" text-anchor="middle">Ре</text>
+              </svg>
+            </div>
+
+            <div class="relative z-10 mt-2 flex items-center justify-between gap-2 flex-wrap font-mono text-[10px]">
+              <span class="text-zinc-500">НОТА <span id="pieceNoteName" class="text-high-voltage font-bold">Ре</span></span>
+              <span class="text-zinc-500">ТОЧНОСТЬ <span id="pieceAccuracy" class="text-emerald-400 font-bold">98%</span></span>
+              <span class="text-zinc-500">ЧИСТОТА <span id="piecePurity" class="text-blue-400 font-bold">85%</span></span>
+              <span class="text-zinc-500">ШАГ <span id="pieceProgress" class="text-zinc-200 font-bold">1/7</span></span>
+            </div>
+
+            <div class="relative z-10 mt-4 grid grid-cols-2 gap-2">
+              <button id="pieceToneBtn" class="btn-haptic cta-glass rounded-full py-3 font-mono text-[11px] flex items-center justify-center gap-2">
+                <svg class="w-3.5 h-3.5 text-high-voltage" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5L6 9H2v6h4l5 4V5z M15.54 8.46a5 5 0 010 7.07"/></svg>
+                <span>ЭТАЛОН</span>
+              </button>
+              <button id="piecePlayBtn" class="btn-haptic cta-primary rounded-full py-3 font-mono text-[11px] font-bold flex items-center justify-center gap-1.5">
+                <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                <span>ИГРАТЬ</span>
+              </button>
+            </div>
+
+            <div class="relative z-10 mt-3 flex items-center justify-between font-mono text-[10px] text-zinc-500">
+              <span class="micro text-zinc-600">ТЕМП ПРОИЗВЕДЕНИЯ</span>
+              <span class="text-zinc-300 font-bold"><span id="bpmCounter">72</span> BPM</span>
+            </div>
+          </article>
+
+          <button id="loadPieceBtn" class="btn-haptic cta-glass rounded-2xl py-4 w-full font-mono text-[11px] flex items-center justify-center gap-2">
+            <span class="text-high-voltage text-base leading-none">＋</span> ЗАГРУЗИТЬ ПРОИЗВЕДЕНИЕ
+          </button>
+
+          <div class="space-y-2">
+            <span class="micro text-zinc-500">МОИ ПРОИЗВЕДЕНИЯ</span>
+            <div id="piecesList" class="glass-card rounded-2xl p-5">
+              <div class="flex items-start gap-3">
+                <span class="w-9 h-9 rounded-xl border border-white/10 bg-white/[0.03] grid place-items-center text-zinc-500 shrink-0">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.6" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/></svg>
+                </span>
+                <div>
+                  <div class="font-display font-semibold text-sm text-white">Библиотека пуста</div>
+                  <div class="font-mono text-[10px] text-zinc-500 mt-1">Форматы MusicXML · MIDI · TXT</div>
+                </div>
+              </div>
+            </div>
+
+            <button id="loadedPieceExample" class="hidden glass-card rounded-2xl p-4 w-full text-left items-center justify-between gap-3">
+              <div>
+                <div class="font-display font-semibold text-sm text-white">Song of the Wind</div>
+                <div class="font-mono text-[10px] text-zinc-500 mt-1">Книга 1 · Струны A и E</div>
+              </div>
+              <span class="font-mono text-[10px] text-emerald-400 font-bold shrink-0">100% ОЦЕНКА</span>
+            </button>
+          </div>
+        </section>
+
+      </div>
+
+      <!-- CALIBRATION MODAL -->
+      <div id="calibrationModal" class="hidden absolute inset-0 z-50 items-center justify-center p-6 bg-obsidian/80 backdrop-blur-2xl">
+        <div class="w-full glass-card rounded-[28px] p-6 space-y-5">
+          <div class="flex items-center justify-between">
+            <span class="micro text-zinc-400">КАЛИБРОВКА ЭТАЛОНА</span>
+            <button id="closeCalibrateBtn" aria-label="Закрыть" class="btn-haptic text-zinc-400 hover:text-white font-mono text-sm w-7 h-7 grid place-items-center rounded-full border border-white/10">✕</button>
+          </div>
+
+          <div>
+            <div class="font-editorial italic text-sm text-zinc-400">Частота первой октавы A4</div>
+            <div class="flex items-baseline gap-1.5 mt-2">
+              <span id="modalPitchDisplay" class="font-display font-black tracking-tighter text-5xl text-white leading-none">440.0</span>
+              <span class="font-mono text-sm text-high-voltage">Hz</span>
+            </div>
+            <p class="font-sans text-[11px] text-zinc-500 mt-2 leading-relaxed">Симфонические оркестры часто настраиваются на 442 Гц. Эталон влияет на все целевые частоты.</p>
+          </div>
+
+          <div class="flex items-center gap-2">
+            <button onclick="changeConcertPitch(-1.0)" class="btn-haptic cta-glass w-11 h-11 rounded-2xl font-mono text-lg font-bold grid place-items-center">−</button>
+            <button onclick="setConcertPitch(440.0)" class="btn-haptic cta-glass flex-1 py-3 rounded-2xl font-mono text-[11px]">440.0 Гц</button>
+            <button onclick="setConcertPitch(442.0)" class="btn-haptic cta-glass flex-1 py-3 rounded-2xl font-mono text-[11px]">442.0 Гц</button>
+            <button onclick="changeConcertPitch(1.0)" class="btn-haptic cta-glass w-11 h-11 rounded-2xl font-mono text-lg font-bold grid place-items-center">+</button>
+          </div>
+
+          <button id="saveCalibrateBtn" class="btn-haptic cta-primary w-full py-3.5 rounded-full font-mono font-bold text-[11px] tracking-widest">ПРИМЕНИТЬ</button>
+        </div>
+      </div>
+
+      <!-- BOTTOM NAV -->
+      <nav class="w-full bg-obsidian/95 backdrop-blur-2xl border-t border-white/[0.06] px-6 pt-2.5 pb-5 z-30 select-none">
+        <div class="flex items-center justify-around gap-2">
+          <button data-tab="tabTuner" class="nav-tab btn-haptic flex flex-col items-center gap-1 text-high-voltage">
+            <span class="nav-icon w-12 h-7 rounded-full grid place-items-center bg-high-voltage text-void shadow-[0_0_20px_rgba(212,255,0,0.35)] transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)]">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+            </span>
+            <span class="nav-label font-mono text-[9px] font-bold tracking-wider uppercase">Тюнер</span>
+          </button>
+
+          <button data-tab="tabTrainer" class="nav-tab btn-haptic flex flex-col items-center gap-1 text-zinc-500">
+            <span class="nav-icon w-12 h-7 rounded-full grid place-items-center bg-transparent text-zinc-500 transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)]">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+            </span>
+            <span class="nav-label font-mono text-[9px] tracking-wider uppercase">Гаммы</span>
+          </button>
+
+          <button data-tab="tabPieces" class="nav-tab btn-haptic flex flex-col items-center gap-1 text-zinc-500">
+            <span class="nav-icon w-12 h-7 rounded-full grid place-items-center bg-transparent text-zinc-500 transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)]">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3"/></svg>
+            </span>
+            <span class="nav-label font-mono text-[9px] tracking-wider uppercase">Пьесы</span>
+          </button>
+        </div>
+        <div class="w-32 h-1 rounded-full bg-white/20 mx-auto mt-3"></div>
+      </nav>
+
+    </main>
+  </div>
+
+  <!-- ================================================================= -->
+  <!-- ENGINE: SCALES · RUSSIAN SOLFEGE · INTONATION PHYSICS · WEBAUDIO -->
+  <!-- ================================================================= -->
+  <script>
+  (function () {
+    'use strict';
+
+    /* ---------- helpers ---------- */
+    var $ = function (id) { return document.getElementById(id); };
+    var setText = function (id, v) { var e = $(id); if (e) e.textContent = v; };
+    var setAttr = function (id, a, v) { var e = $(id); if (e) e.setAttribute(a, v); };
+
+    /* ---------- music constants ---------- */
+    var RU = { 'C':'До','C#':'До#','D':'Ре','D#':'Ре#','E':'Ми','F':'Фа','F#':'Фа#','G':'Соль','G#':'Соль#','A':'Ля','A#':'Ля#','B':'Си' };
+    var STRING_SEMITONE = { C:0, D:2, E:4, F:5, G:7, A:9, B:11 };
+
+    var STRINGS = {
+      G: { russian: 'Соль', code: 'G3', hz: 196.00, label: 'Соль (G)' },
+      D: { russian: 'Ре',   code: 'D4', hz: 293.66, label: 'Ре (D)' },
+      A: { russian: 'Ля',   code: 'A4', hz: 440.00, label: 'Ля (A)' },
+      E: { russian: 'Ми',   code: 'E5', hz: 659.25, label: 'Ми (E)' }
+    };
+
+    var SCALE_ORDER = ['c-maj', 'g-maj', 'd-maj', 'a-maj', 'a-min', 'e-min', 'b-min', 'd-min'];
+    var SCALE_LABEL = { 'c-maj':'До маж','g-maj':'Соль маж','d-maj':'Ре маж','a-maj':'Ля маж','a-min':'Ля мин','e-min':'Ми мин','b-min':'Си мин','d-min':'Ре мин' };
+    var SCALE_SIG_SHORT = { 'c-maj':'0','g-maj':'1#','d-maj':'2#','a-maj':'3#','a-min':'0','e-min':'1#','b-min':'2#','d-min':'1♭' };
+
+    /* ---------- state ---------- */
+    var state = {
+      tunerMode: 'tuner',
+      activeString: 'A',
+      concertA4: 440.0,
+      currentNoteRussian: 'Ре#',
+      currentOctave: 4,
+      currentNoteCode: 'D#4',
+      currentCents: -10.0,
+      displayCents: -10.0,
+      targetHz: 311.13,
+      currentHz: 309.30,
+      isMicActive: false,
+      bowPressure: 65,
+      streak: 7,
+      bpm: 72,
+      trainMode: 'fixed',
+      currentScaleKey: 'd-maj',
+      currentScaleStepIndex: 2,
+      pieceIndex: 0,
+      piece: {
+        notes: [
+          { russian: 'Ре', code: 'D4', hz: 293.66 },
+          { russian: 'Ре', code: 'D4', hz: 293.66 },
+          { russian: 'Ля', code: 'A4', hz: 440.00 },
+          { russian: 'Ля', code: 'A4', hz: 440.00 },
+          { russian: 'Си', code: 'B4', hz: 493.88 },
+          { russian: 'Си', code: 'B4', hz: 493.88 },
+          { russian: 'Ля', code: 'A4', hz: 440.00 }
+        ]
+      },
+      /* Full 8-scale dataset: russian / octave / code / finger / string / hz */
+      scales: {
+        'd-maj': { title: 'Ре мажор (D dur)', keySig: '2 диеза (Фа#, До#)', notes: [
+          { russian:'Ре', octave:4, code:'D4', finger:'0 (Открытая)', string:'Ре (D)', hz:293.66 },
+          { russian:'Ми', octave:4, code:'E4', finger:'1-й палец', string:'Ре (D)', hz:329.63 },
+          { russian:'Фа#', octave:4, code:'F#4', finger:'2-й палец (широкий)', string:'Ре (D)', hz:369.99 },
+          { russian:'Соль', octave:4, code:'G4', finger:'3-й палец (полутон)', string:'Ре (D)', hz:392.00 },
+          { russian:'Ля', octave:4, code:'A4', finger:'0 (Открытая)', string:'Ля (A)', hz:440.00 },
+          { russian:'Си', octave:4, code:'B4', finger:'1-й палец', string:'Ля (A)', hz:493.88 },
+          { russian:'До#', octave:5, code:'C#5', finger:'2-й палец (широкий)', string:'Ля (A)', hz:554.37 },
+          { russian:'Ре', octave:5, code:'D5', finger:'3-й палец (полутон)', string:'Ля (A)', hz:587.33 }
+        ]},
+        'g-maj': { title: 'Соль мажор (G dur)', keySig: '1 диез (Фа#)', notes: [
+          { russian:'Соль', octave:3, code:'G3', finger:'0 (Открытая)', string:'Соль (G)', hz:196.00 },
+          { russian:'Ля', octave:3, code:'A3', finger:'1-й палец', string:'Соль (G)', hz:220.00 },
+          { russian:'Си', octave:3, code:'B3', finger:'2-й палец (широкий)', string:'Соль (G)', hz:246.94 },
+          { russian:'До', octave:4, code:'C4', finger:'3-й палец (полутон)', string:'Соль (G)', hz:261.63 },
+          { russian:'Ре', octave:4, code:'D4', finger:'0 (Открытая)', string:'Ре (D)', hz:293.66 },
+          { russian:'Ми', octave:4, code:'E4', finger:'1-й палец', string:'Ре (D)', hz:329.63 },
+          { russian:'Фа#', octave:4, code:'F#4', finger:'2-й палец', string:'Ре (D)', hz:369.99 },
+          { russian:'Соль', octave:4, code:'G4', finger:'3-й палец', string:'Ре (D)', hz:392.00 }
+        ]},
+        'c-maj': { title: 'До мажор (C dur)', keySig: 'Без знаков', notes: [
+          { russian:'До', octave:4, code:'C4', finger:'3-й палец', string:'Соль (G)', hz:261.63 },
+          { russian:'Ре', octave:4, code:'D4', finger:'0 (Открытая)', string:'Ре (D)', hz:293.66 },
+          { russian:'Ми', octave:4, code:'E4', finger:'1-й палец', string:'Ре (D)', hz:329.63 },
+          { russian:'Фа', octave:4, code:'F4', finger:'2-й палец (низкий)', string:'Ре (D)', hz:349.23 },
+          { russian:'Соль', octave:4, code:'G4', finger:'3-й палец', string:'Ре (D)', hz:392.00 },
+          { russian:'Ля', octave:4, code:'A4', finger:'0 (Открытая)', string:'Ля (A)', hz:440.00 },
+          { russian:'Си', octave:4, code:'B4', finger:'1-й палец', string:'Ля (A)', hz:493.88 },
+          { russian:'До', octave:5, code:'C5', finger:'2-й палец (низкий)', string:'Ля (A)', hz:523.25 }
+        ]},
+        'a-maj': { title: 'Ля мажор (A dur)', keySig: '3 диеза (Фа#, До#, Соль#)', notes: [
+          { russian:'Ля', octave:4, code:'A4', finger:'0 (Открытая)', string:'Ля (A)', hz:440.00 },
+          { russian:'Си', octave:4, code:'B4', finger:'1-й палец', string:'Ля (A)', hz:493.88 },
+          { russian:'До#', octave:5, code:'C#5', finger:'2-й палец (широкий)', string:'Ля (A)', hz:554.37 },
+          { russian:'Ре', octave:5, code:'D5', finger:'3-й палец (полутон)', string:'Ля (A)', hz:587.33 },
+          { russian:'Ми', octave:5, code:'E5', finger:'0 (Открытая)', string:'Ми (E)', hz:659.25 },
+          { russian:'Фа#', octave:5, code:'F#5', finger:'1-й палец', string:'Ми (E)', hz:739.99 },
+          { russian:'Соль#', octave:5, code:'G#5', finger:'2-й палец (широкий)', string:'Ми (E)', hz:830.61 },
+          { russian:'Ля', octave:5, code:'A5', finger:'3-й палец', string:'Ми (E)', hz:880.00 }
+        ]},
+        'a-min': { title: 'Ля минор (A moll)', keySig: 'Натуральный', notes: [
+          { russian:'Ля', octave:4, code:'A4', finger:'0 (Открытая)', string:'Ля (A)', hz:440.00 },
+          { russian:'Си', octave:4, code:'B4', finger:'1-й палец', string:'Ля (A)', hz:493.88 },
+          { russian:'До', octave:5, code:'C5', finger:'2-й палец (низкий)', string:'Ля (A)', hz:523.25 },
+          { russian:'Ре', octave:5, code:'D5', finger:'3-й палец', string:'Ля (A)', hz:587.33 },
+          { russian:'Ми', octave:5, code:'E5', finger:'0 (Открытая)', string:'Ми (E)', hz:659.25 },
+          { russian:'Фа', octave:5, code:'F5', finger:'1-й палец (низкий)', string:'Ми (E)', hz:698.46 },
+          { russian:'Соль', octave:5, code:'G5', finger:'2-й палец', string:'Ми (E)', hz:783.99 },
+          { russian:'Ля', octave:5, code:'A5', finger:'3-й палец', string:'Ми (E)', hz:880.00 }
+        ]},
+        'b-min': { title: 'Си минор (B moll)', keySig: '2 диеза (Фа#, До#)', notes: [
+          { russian:'Си', octave:4, code:'B4', finger:'1-й палец', string:'Ля (A)', hz:493.88 },
+          { russian:'До#', octave:5, code:'C#5', finger:'2-й палец (высокий)', string:'Ля (A)', hz:554.37 },
+          { russian:'Ре', octave:5, code:'D5', finger:'3-й палец', string:'Ля (A)', hz:587.33 },
+          { russian:'Ми', octave:5, code:'E5', finger:'0 (Открытая)', string:'Ми (E)', hz:659.25 },
+          { russian:'Фа#', octave:5, code:'F#5', finger:'1-й палец', string:'Ми (E)', hz:739.99 },
+          { russian:'Соль', octave:5, code:'G5', finger:'2-й палец (низкий)', string:'Ми (E)', hz:783.99 },
+          { russian:'Ля', octave:5, code:'A5', finger:'3-й палец', string:'Ми (E)', hz:880.00 },
+          { russian:'Си', octave:5, code:'B5', finger:'4-й палец', string:'Ми (E)', hz:987.77 }
+        ]},
+        'e-min': { title: 'Ми минор (E moll)', keySig: '1 диез (Фа#)', notes: [
+          { russian:'Ми', octave:4, code:'E4', finger:'1-й палец', string:'Ре (D)', hz:329.63 },
+          { russian:'Фа#', octave:4, code:'F#4', finger:'2-й палец', string:'Ре (D)', hz:369.99 },
+          { russian:'Соль', octave:4, code:'G4', finger:'3-й палец', string:'Ре (D)', hz:392.00 },
+          { russian:'Ля', octave:4, code:'A4', finger:'0 (Открытая)', string:'Ля (A)', hz:440.00 },
+          { russian:'Си', octave:4, code:'B4', finger:'1-й палец', string:'Ля (A)', hz:493.88 },
+          { russian:'До', octave:5, code:'C5', finger:'2-й палец', string:'Ля (A)', hz:523.25 },
+          { russian:'Ре', octave:5, code:'D5', finger:'3-й палец', string:'Ля (A)', hz:587.33 },
+          { russian:'Ми', octave:5, code:'E5', finger:'0 (Открытая)', string:'Ми (E)', hz:659.25 }
+        ]},
+        'd-min': { title: 'Ре минор (D moll)', keySig: '1 бемоль (Си♭)', notes: [
+          { russian:'Ре', octave:4, code:'D4', finger:'0 (Открытая)', string:'Ре (D)', hz:293.66 },
+          { russian:'Ми', octave:4, code:'E4', finger:'1-й палец', string:'Ре (D)', hz:329.63 },
+          { russian:'Фа', octave:4, code:'F4', finger:'2-й палец (низкий)', string:'Ре (D)', hz:349.23 },
+          { russian:'Соль', octave:4, code:'G4', finger:'3-й палец', string:'Ре (D)', hz:392.00 },
+          { russian:'Ля', octave:4, code:'A4', finger:'0 (Открытая)', string:'Ля (A)', hz:440.00 },
+          { russian:'Си♭', octave:4, code:'Bb4', finger:'1-й палец (низкий)', string:'Ля (A)', hz:466.16 },
+          { russian:'До', octave:5, code:'C5', finger:'2-й палец', string:'Ля (A)', hz:523.25 },
+          { russian:'Ре', octave:5, code:'D5', finger:'3-й палец', string:'Ля (A)', hz:587.33 }
+        ]}
+      }
+    };
+
+    var PILL_BASE = 'px-4 py-2 rounded-full font-mono text-[11px] font-bold tracking-wider uppercase flex items-center gap-2 transition-all duration-300';
+
+    /* ---------- note maths ---------- */
+    function noteParts(code) {
+      var letter = code.charAt(0).toUpperCase();
+      var octave = parseInt(code.charAt(code.length - 1), 10);
+      var acc = code.slice(1, code.length - 1);
+      return { letter: letter, octave: octave, acc: acc };
+    }
+    function accOf(code) {
+      var a = code.slice(1, code.length - 1);
+      if (a.indexOf('#') >= 0) return '#';
+      if (a.toLowerCase() === 'b') return '♭';
+      return '';
+    }
+    function ruName(code) {
+      var p = noteParts(code);
+      if (p.acc === '#') return RU[p.letter + '#'] || RU[p.letter] || p.letter;
+      if (p.acc.toLowerCase() === 'b') return (RU[p.letter] || p.letter) + '♭';
+      return RU[p.letter] || p.letter;
+    }
+    function staffY(code) {
+      var p = noteParts(code);
+      var li = 'CDEFGAB'.indexOf(p.letter);
+      if (li < 0) return 40;
+      var step = p.octave * 7 + li;
+      return 60 - (step - 30) * 5;
+    }
+    function nearestNote(hz) {
+      var EN = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+      var midi = Math.round(69 + 12 * Math.log2(hz / 440));
+      var name = EN[((midi % 12) + 12) % 12];
+      var octave = Math.floor(midi / 12) - 1;
+      return { name: name, octave: octave, code: name + octave };
+    }
+
+    /* ---------- clock ---------- */
+    function updateClock() {
+      var d = new Date();
+      var h = String(d.getHours()).padStart(2, '0');
+      var m = String(d.getMinutes()).padStart(2, '0');
+      setText('clockElement', h + ':' + m);
+    }
+    updateClock();
+    setInterval(updateClock, 1000);
+
+    /* ---------- gauge + strobe construction ---------- */
+    function buildGaugeTicks() {
+      var g = $('centGaugeTicks');
+      if (!g) return;
+      var cx = 120, cy = 118, R = 92, out = '';
+      for (var v = -50; v <= 50; v += 5) {
+        var t = (v / 50) * 90 * Math.PI / 180;
+        var major = (v % 25 === 0);
+        var r1 = major ? 70 : 78;
+        var x1 = cx + r1 * Math.sin(t), y1 = cy - r1 * Math.cos(t);
+        var x2 = cx + R * Math.sin(t), y2 = cy - R * Math.cos(t);
+        out += '<line x1="' + x1.toFixed(1) + '" y1="' + y1.toFixed(1) + '" x2="' + x2.toFixed(1) + '" y2="' + y2.toFixed(1) +
+               '" stroke="' + (major ? 'rgba(255,255,255,0.42)' : 'rgba(255,255,255,0.16)') +
+               '" stroke-width="' + (major ? 1.6 : 1) + '"/>';
+      }
+      g.innerHTML = out;
+    }
+
+    var STROBE_BARS = 64;
+    var STROBE_STEP = 10; /* bar width 4 + gap 6 */
+    var STROBE_WIDTH = STROBE_BARS * STROBE_STEP;
+    var strobeOffset = 0;
+    function buildStrobe() {
+      var track = $('strobeTrack');
+      if (!track) return;
+      var html = '';
+      for (var i = 0; i < STROBE_BARS * 2; i++) html += '<span class="strobe-bar"></span>';
+      track.innerHTML = html;
+    }
+
+    /* ---------- staff painting ---------- */
+    function paintStaff(prefix, code, opts) {
+      opts = opts || {};
+      var cx = (opts.cx === undefined) ? 150 : opts.cx;
+      var y = staffY(code);
+      setAttr(prefix + 'Note', 'cy', y);
+      var a = $(prefix + 'Accidental');
+      if (a) {
+        var acc = accOf(code);
+        a.textContent = acc;
+        a.style.opacity = acc ? '0.9' : '0';
+        a.setAttribute('x', cx - 14);
+        a.setAttribute('y', y + 5);
+      }
+      var l = $(prefix + 'Label');
+      if (l) {
+        l.setAttribute('x', cx);
+        l.setAttribute('y', Math.min(104, y + 34));
+        l.textContent = opts.label || (ruName(code) + noteParts(code).octave);
+      }
+    }
+
+    /* ---------- tuner UI ---------- */
+    function renderPitchUI() {
+      var cents = state.currentCents;
+      setText('noteRussian', state.currentNoteRussian);
+      setText('noteOctave', state.currentOctave);
+      setText('noteCodeDisplay', state.currentNoteCode);
+      setText('centsDisplay', (cents > 0 ? '+' : '') + cents.toFixed(0) + '¢');
+      setText('currentHz', state.currentHz.toFixed(1) + ' Hz');
+      setText('targetHzDisplay', state.targetHz.toFixed(1) + ' Hz');
+
+      var centsEl = $('centsDisplay');
+      var needleLine = $('centNeedleLine');
+      var ball = $('centBall');
+      var pill = $('guidancePill');
+      var glow = $('tunerGlow');
+      var sub = $('statusSubLabel');
+      var icon = $('guidanceIcon');
+      var strobeWrap = $('strobeWrap');
+
+      if (Math.abs(cents) <= 3.0) {
+        if (centsEl) centsEl.className = 'font-mono text-3xl font-black tracking-tight text-high-voltage';
+        if (needleLine) needleLine.setAttribute('stroke', '#D4FF00');
+        if (ball) ball.setAttribute('fill', '#D4FF00');
+        if (pill) pill.className = PILL_BASE + ' bg-high-voltage text-void shadow-[0_0_28px_rgba(212,255,0,0.4)]';
+        setText('guidanceText', state.tunerMode === 'accuracy' ? 'ИДЕАЛЬНАЯ ИНТОНАЦИЯ ✓' : 'В СТРОЮ ✓');
+        if (sub) sub.textContent = 'Точное попадание в ' + state.currentNoteCode + ' · ' + state.targetHz.toFixed(1) + ' Гц';
+        if (glow) glow.className = 'absolute -top-1/2 -left-1/3 w-[130%] h-[130%] radial-glow-lime opacity-80 transition-opacity duration-700 pointer-events-none';
+        if (icon) icon.style.transform = 'rotate(0deg)';
+        if (strobeWrap) strobeWrap.classList.add('strobe-lock');
+      } else if (cents < -3.0) {
+        if (centsEl) centsEl.className = 'font-mono text-3xl font-black tracking-tight text-solar-amber';
+        if (needleLine) needleLine.setAttribute('stroke', '#FF5500');
+        if (ball) ball.setAttribute('fill', '#FF5500');
+        if (pill) pill.className = PILL_BASE + ' bg-solar-amber text-void shadow-[0_0_24px_rgba(255,85,0,0.35)]';
+        setText('guidanceText', state.tunerMode === 'accuracy' ? 'НЕМНОГО ВЫШЕ ↗' : 'НАТЯНУТЬ ↗');
+        if (sub) sub.textContent = 'Низит на ' + Math.abs(cents).toFixed(0) + '¢ относительно ' + state.currentNoteCode + ' · ' + state.targetHz.toFixed(1) + ' Гц';
+        if (glow) glow.className = 'absolute -top-1/2 -left-1/3 w-[130%] h-[130%] radial-glow-amber opacity-60 transition-opacity duration-700 pointer-events-none';
+        if (icon) icon.style.transform = 'rotate(-45deg)';
+        if (strobeWrap) strobeWrap.classList.remove('strobe-lock');
+      } else {
+        if (centsEl) centsEl.className = 'font-mono text-3xl font-black tracking-tight text-amber-400';
+        if (needleLine) needleLine.setAttribute('stroke', '#FBBF24');
+        if (ball) ball.setAttribute('fill', '#FBBF24');
+        if (pill) pill.className = PILL_BASE + ' bg-amber-400 text-void shadow-[0_0_24px_rgba(251,191,36,0.35)]';
+        setText('guidanceText', state.tunerMode === 'accuracy' ? 'НЕМНОГО НИЖЕ ↘' : 'ОСЛАБИТЬ ↘');
+        if (sub) sub.textContent = 'Высит на +' + cents.toFixed(0) + '¢ относительно ' + state.currentNoteCode + ' · ' + state.targetHz.toFixed(1) + ' Гц';
+        if (glow) glow.className = 'absolute -top-1/2 -left-1/3 w-[130%] h-[130%] radial-glow-cobalt opacity-60 transition-opacity duration-700 pointer-events-none';
+        if (icon) icon.style.transform = 'rotate(135deg)';
+        if (strobeWrap) strobeWrap.classList.remove('strobe-lock');
+      }
+
+      updateDerived();
+      updateStaffs();
+    }
+
+    function updateDerived() {
+      var c = Math.abs(state.currentCents);
+      var smooth = Math.max(34, Math.round(100 - c * 1.1));
+      setText('smoothnessLabel', smooth + '%');
+      var sb = $('smoothnessBar');
+      if (sb) sb.style.width = smooth + '%';
+      var conf = Math.max(52, 100 - c * 0.45);
+      setText('confidenceText', conf.toFixed(1) + '%');
+    }
+
+    function updateStaffs() {
+      var cents = state.currentCents;
+      paintStaff('staffTarget', state.currentNoteCode, { cx: 150 });
+      var nn = nearestNote(state.currentHz);
+      var nudge = Math.max(-16, Math.min(16, (cents / 50) * 16));
+      paintStaff('staffPlayed', nn.code, { cx: 250 + nudge, label: ruName(nn.code) + nn.octave });
+    }
+
+    function updateBowPressure() {
+      var v = state.bowPressure;
+      setText('bowPressureLabel', v + '%');
+      var bar = $('bowPressureBar');
+      if (bar) {
+        bar.style.width = v + '%';
+        bar.className = 'h-full transition-all duration-500 ease-out ' +
+          (v > 85 ? 'bg-crimson-scratch' : (v > 60 ? 'bg-emerald-400' : 'bg-electric-cobalt'));
+      }
+      var banner = $('scratchWarningBanner');
+      if (banner) {
+        if (v > 85) { banner.classList.remove('hidden'); banner.classList.add('flex'); }
+        else { banner.classList.add('hidden'); banner.classList.remove('flex'); }
+      }
+    }
+
+    function setTunerMode(mode) {
+      state.tunerMode = mode;
+      var t = $('modeTunerBtn'), a = $('modeAccuracyBtn');
+      if (mode === 'tuner') {
+        if (t) t.className = 'btn-haptic py-2.5 px-3 rounded-xl font-mono text-[11px] font-bold flex items-center justify-center gap-2 bg-high-voltage text-void shadow-[0_0_22px_rgba(212,255,0,0.28)]';
+        if (a) a.className = 'btn-haptic py-2.5 px-3 rounded-xl font-mono text-[11px] font-semibold text-zinc-400 hover:text-white flex items-center justify-center gap-2';
+        setText('modeHeading', 'ДЕТЕКТОР НОТЫ');
+        setText('topBarModeIndicator', 'ТЮНЕР');
+      } else {
+        if (a) a.className = 'btn-haptic py-2.5 px-3 rounded-xl font-mono text-[11px] font-bold flex items-center justify-center gap-2 bg-high-voltage text-void shadow-[0_0_22px_rgba(212,255,0,0.28)]';
+        if (t) t.className = 'btn-haptic py-2.5 px-3 rounded-xl font-mono text-[11px] font-semibold text-zinc-400 hover:text-white flex items-center justify-center gap-2';
+        setText('modeHeading', 'СРАВНЕНИЕ НОТ');
+        setText('topBarModeIndicator', 'ТОЧНОСТЬ');
+      }
+      renderPitchUI();
+    }
+
+    window.setTunerMode = setTunerMode;
+    $('modeTunerBtn') && $('modeTunerBtn').addEventListener('click', function () { setTunerMode('tuner'); });
+    $('modeAccuracyBtn') && $('modeAccuracyBtn').addEventListener('click', function () { setTunerMode('accuracy'); });
+
+    /* string selection + open-string audition */
+    window.selectString = function (s) {
+      state.activeString = s;
+      var data = STRINGS[s];
+      var btns = document.querySelectorAll('#stringComparisonRow .string-btn');
+      for (var i = 0; i < btns.length; i++) {
+        var isActive = btns[i].getAttribute('data-string') === s;
+        btns[i].className = 'string-btn btn-haptic glass-card rounded-2xl px-2 py-3 flex flex-col items-center gap-2 transition-all duration-300 ' +
+          (isActive ? 'border-high-voltage/60 ring-1 ring-high-voltage/40' : 'border-white/[0.08]');
+        var lbl = btns[i].querySelector('.string-label');
+        if (lbl) {
+          lbl.className = 'string-label font-mono text-[9px] tracking-wider uppercase ' + (isActive ? 'text-high-voltage' : 'text-zinc-400');
+        }
+      }
+      if (data) {
+        setText('activeStringSpec', data.label);
+        setText('activeStringHz', data.hz.toFixed(1) + ' Hz');
+        playViolinTone(data.hz);
+      }
+    };
+
+    /* pitch simulator */
+    window.simulateBowNote = function (russian, code, targetHz, cents) {
+      state.currentNoteRussian = russian;
+      state.currentNoteCode = code;
+      state.currentOctave = noteParts(code).octave;
+      state.targetHz = targetHz;
+      state.currentCents = cents;
+      state.currentHz = targetHz * Math.pow(2, cents / 1200);
+
+      var slider = $('pitchSimulatorSlider');
+      if (slider) slider.value = cents;
+      setText('sliderCentsLabel', (cents > 0 ? '+' : '') + cents.toFixed(0) + '¢');
+
+      var btns = document.querySelectorAll('.test-note-btn');
+      for (var i = 0; i < btns.length; i++) {
+        var on = btns[i].textContent.trim() === russian;
+        btns[i].className = 'test-note-btn btn-haptic py-2 rounded-xl font-mono text-xs transition-all duration-300 ' +
+          (on ? 'bg-solar-amber/15 border border-solar-amber/40 font-bold text-solar-amber'
+              : 'bg-white/[0.03] border border-white/[0.08] font-semibold text-zinc-300 hover:border-white/25');
+      }
+
+      renderPitchUI();
+      playViolinTone(state.currentHz);
+    };
+
+    $('pitchSimulatorSlider') && $('pitchSimulatorSlider').addEventListener('input', function (e) {
+      var val = parseFloat(e.target.value);
+      state.currentCents = val;
+      state.currentHz = state.targetHz * Math.pow(2, val / 1200);
+      setText('sliderCentsLabel', (val > 0 ? '+' : '') + val.toFixed(0) + '¢');
+      renderPitchUI();
+    });
+
+    $('bowPressureSlider') && $('bowPressureSlider').addEventListener('input', function (e) {
+      state.bowPressure = parseInt(e.target.value, 10);
+      updateBowPressure();
+    });
+
+    /* ---------- scales engine ---------- */
+    var bowDown = true;
+
+    function paintScaleButtons() {
+      var btns = document.querySelectorAll('#scaleScrollbar .scale-select-btn');
+      for (var i = 0; i < btns.length; i++) {
+        var active = btns[i].getAttribute('data-scale') === state.currentScaleKey;
+        btns[i].className = 'scale-select-btn btn-haptic shrink-0 px-3.5 py-2 rounded-full border font-mono text-[11px] transition-all duration-300 ' +
+          (active ? 'bg-high-voltage text-void border-high-voltage font-bold'
+                  : 'bg-white/[0.03] text-zinc-400 border-white/[0.08] hover:border-white/25 hover:text-zinc-200');
+      }
+    }
+
+    function selectScale(key) {
+      state.currentScaleKey = key;
+      state.currentScaleStepIndex = 0;
+      paintScaleButtons();
+      renderScaleSteps();
+    }
+    window.selectScale = selectScale;
+
+    function buildScaleButtons() {
+      var cont = $('scaleScrollbar');
+      if (!cont) return;
+      cont.innerHTML = '';
+      SCALE_ORDER.forEach(function (key) {
+        var b = document.createElement('button');
+        b.type = 'button';
+        b.setAttribute('data-scale', key);
+        b.textContent = SCALE_LABEL[key];
+        b.className = 'scale-select-btn btn-haptic shrink-0 px-3.5 py-2 rounded-full border font-mono text-[11px] transition-all duration-300';
+        b.addEventListener('click', function () { selectScale(key); });
+        cont.appendChild(b);
+      });
+      paintScaleButtons();
+    }
+
+    function updateTrainerStaff() {
+      var sc = state.scales[state.currentScaleKey];
+      if (!sc) return;
+      var cur = sc.notes[state.currentScaleStepIndex];
+      var prev = sc.notes[(state.currentScaleStepIndex - 1 + sc.notes.length) % sc.notes.length];
+      paintStaff('trainerTarget', cur.code, { cx: 150, label: cur.russian + cur.octave });
+      paintStaff('trainerPlayed', prev.code, { cx: 250, label: prev.russian + prev.octave });
+    }
+
+    function renderScaleSteps() {
+      var sc = state.scales[state.currentScaleKey];
+      if (!sc) return;
+
+      setText('activeScaleBadge', sc.title.toUpperCase() + ' · ' + (SCALE_SIG_SHORT[state.currentScaleKey] || ''));
+      setText('keySigDisplay', sc.keySig);
+      setText('stepProgressText', (state.currentScaleStepIndex + 1) + ' / ' + sc.notes.length);
+
+      var cur = sc.notes[state.currentScaleStepIndex];
+      setText('targetScaleNoteRussian', cur.russian);
+      setText('targetScaleOctave', cur.octave);
+      setText('targetFingerInfo', cur.finger);
+      setText('targetStringInfo', cur.string);
+      setText('targetHzInfo', cur.hz.toFixed(2) + ' Hz');
+
+      var accEl = $('keySigAccidentals');
+      if (accEl) {
+        var sig = sc.keySig;
+        if (sig.indexOf('2 диеза') >= 0) accEl.textContent = '##';
+        else if (sig.indexOf('3 диеза') >= 0) accEl.textContent = '###';
+        else if (sig.indexOf('1 диез') >= 0) accEl.textContent = '#';
+        else if (sig.indexOf('1 бемоль') >= 0) accEl.textContent = '♭';
+        else accEl.textContent = '';
+      }
+
+      bowDown = !bowDown;
+      setText('bowDirectionBadge', bowDown ? '↓ Смычок вниз' : '↑ Смычок вверх');
+      setText('trainerBowDirection', bowDown ? '↓ Вниз' : '↑ Вверх');
+
+      var purity = Math.min(98, 68 + Math.round((state.currentScaleStepIndex / sc.notes.length) * 30));
+      setText('trainerPurityLabel', purity + '%');
+      var pb = $('trainerPurityBar');
+      if (pb) pb.style.width = purity + '%';
+
+      var cont = $('scaleStepsContainer');
+      if (cont) {
+        cont.innerHTML = '';
+        sc.notes.forEach(function (note, idx) {
+          var isCur = idx === state.currentScaleStepIndex;
+          var isDone = idx < state.currentScaleStepIndex;
+          var btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'scale-step btn-haptic shrink-0 px-3 py-2 rounded-xl font-mono text-xs transition-all duration-300 ' +
+            (isCur ? 'bg-high-voltage text-void font-black shadow-[0_0_18px_rgba(212,255,0,0.35)] scale-105'
+                   : (isDone ? 'bg-white/[0.06] text-emerald-400 border border-emerald-500/25'
+                             : 'bg-white/[0.02] text-zinc-400 border border-white/[0.08] hover:border-white/25'));
+          btn.innerHTML = '<span>' + note.russian + '</span><span class="opacity-60 ml-0.5 text-[9px]">' + note.octave + '</span>';
+          btn.addEventListener('click', function () {
+            state.currentScaleStepIndex = idx;
+            renderScaleSteps();
+            playViolinTone(note.hz);
+          });
+          cont.appendChild(btn);
+        });
+      }
+
+      updateTrainerStaff();
+    }
+
+    $('trainerPlayBtn') && $('trainerPlayBtn').addEventListener('click', function () {
+      var sc = state.scales[state.currentScaleKey];
+      var note = sc.notes[state.currentScaleStepIndex];
+      playViolinTone(note.hz);
+      state.streak++;
+      setText('scaleStreakCounter', state.streak + ' НОТ');
+      state.currentScaleStepIndex = (state.currentScaleStepIndex + 1) % sc.notes.length;
+      renderScaleSteps();
+    });
+
+    $('hearTargetNoteBtn') && $('hearTargetNoteBtn').addEventListener('click', function () {
+      var sc = state.scales[state.currentScaleKey];
+      playViolinTone(sc.notes[state.currentScaleStepIndex].hz);
+    });
+
+    window.setTrainMode = function (mode) {
+      state.trainMode = mode;
+      var btns = document.querySelectorAll('.train-mode-btn');
+      for (var i = 0; i < btns.length; i++) {
+        btns[i].className = 'train-mode-btn btn-haptic px-2.5 py-1.5 rounded-full font-mono text-[9px] transition-all duration-300 bg-white/[0.03] text-zinc-400 border border-white/[0.08] hover:border-white/25';
+      }
+      var active = $('trainMode' + mode.charAt(0).toUpperCase() + mode.slice(1));
+      if (active) active.className = 'train-mode-btn btn-haptic px-2.5 py-1.5 rounded-full font-mono text-[9px] font-bold transition-all duration-300 bg-high-voltage text-void border border-high-voltage shadow-[0_0_12px_rgba(212,255,0,0.25)]';
+    };
+
+    /* ---------- pieces ---------- */
+    function renderPiece() {
+      var p = state.piece;
+      var n = p.notes[state.pieceIndex];
+      setText('pieceNoteName', n.russian);
+      var y = staffY(n.code);
+      setAttr('pieceTargetNote', 'cy', y);
+      var l = $('pieceNoteNameLabel');
+      if (l) { l.setAttribute('y', Math.min(92, y + 30)); l.textContent = n.russian + noteParts(n.code).octave; }
+      setText('pieceKeySig', accOf(n.code) || '');
+      setText('pieceProgress', (state.pieceIndex + 1) + '/' + p.notes.length);
+      setText('pieceAccuracy', (92 + (state.pieceIndex % 5) * 2) + '%');
+      setText('piecePurity', (78 + (state.pieceIndex % 4) * 3) + '%');
+      setText('bpmDisplay', state.bpm);
+      setText('bpmCounter', state.bpm);
+    }
+
+    $('piecePlayBtn') && $('piecePlayBtn').addEventListener('click', function () {
+      var p = state.piece;
+      playViolinTone(p.notes[state.pieceIndex].hz);
+      state.pieceIndex = (state.pieceIndex + 1) % p.notes.length;
+      renderPiece();
+    });
+    $('pieceToneBtn') && $('pieceToneBtn').addEventListener('click', function () {
+      playViolinTone(state.piece.notes[state.pieceIndex].hz);
+    });
+    $('loadPieceBtn') && $('loadPieceBtn').addEventListener('click', function () {
+      var empty = $('piecesList'), ex = $('loadedPieceExample');
+      if (empty) empty.classList.add('hidden');
+      if (ex) { ex.classList.remove('hidden'); ex.classList.add('flex'); }
+    });
+    $('loadedPieceExample') && $('loadedPieceExample').addEventListener('click', function () {
+      playViolinTone(state.piece.notes[0].hz);
+    });
+
+    window.adjustBpm = function (delta) {
+      state.bpm = Math.min(180, Math.max(40, state.bpm + delta));
+      setText('bpmDisplay', state.bpm);
+      setText('bpmCounter', state.bpm);
+    };
+
+    /* ---------- auditions: Web Audio violin synth (sawtooth + lowpass) ---------- */
+    window.playViolinTone = function (freq) {
+      try {
+        var AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (!AudioCtx) return;
+        var ctx = new AudioCtx();
+        var osc = ctx.createOscillator();
+        var sub = ctx.createOscillator();
+        var gain = ctx.createGain();
+        var filter = ctx.createBiquadFilter();
+
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(freq, ctx.currentTime);
+
+        sub.type = 'sine';
+        sub.frequency.setValueAtTime(freq, ctx.currentTime);
+
+        filter.type = 'lowpass';
+        filter.frequency.setValueAtTime(Math.min(16000, freq * 3.4), ctx.currentTime);
+        filter.Q.setValueAtTime(3.5, ctx.currentTime);
+
+        gain.gain.setValueAtTime(0.001, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.22, ctx.currentTime + 0.08);
+        gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 1.1);
+
+        osc.connect(filter);
+        sub.connect(filter);
+        filter.connect(gain);
+        gain.connect(ctx.destination);
+
+        osc.start();
+        sub.start();
+        osc.stop(ctx.currentTime + 1.15);
+        sub.stop(ctx.currentTime + 1.15);
+        osc.onended = function () { try { ctx.close(); } catch (e) {} };
+      } catch (e) {
+        console.warn('Аудио недоступно:', e);
+      }
+    };
+
+    /* ---------- mic + calibration ---------- */
+    $('micToggleBtn') && $('micToggleBtn').addEventListener('click', function () {
+      state.isMicActive = !state.isMicActive;
+      var dot = $('micStatusDot'), btn = $('micToggleBtn');
+      if (state.isMicActive) {
+        if (dot) dot.className = 'w-2 h-2 rounded-full bg-high-voltage animate-ping-slow';
+        setText('micStatusText', 'MIC ON');
+        if (btn) btn.className = 'btn-haptic flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-mono font-semibold border border-high-voltage/40 bg-high-voltage/10 text-white';
+      } else {
+        if (dot) dot.className = 'w-2 h-2 rounded-full bg-zinc-600 transition-colors';
+        setText('micStatusText', 'MIC OFF');
+        if (btn) btn.className = 'btn-haptic flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-mono font-semibold border border-white/10 bg-white/[0.03] text-zinc-300 hover:border-high-voltage/50';
+      }
+    });
+
+    var modal = $('calibrationModal');
+    function showModal(show) {
+      if (!modal) return;
+      if (show) { modal.classList.remove('hidden'); modal.classList.add('flex'); }
+      else { modal.classList.add('hidden'); modal.classList.remove('flex'); }
+    }
+    $('calibrateBtn') && $('calibrateBtn').addEventListener('click', function () { showModal(true); });
+    $('closeCalibrateBtn') && $('closeCalibrateBtn').addEventListener('click', function () { showModal(false); });
+    $('saveCalibrateBtn') && $('saveCalibrateBtn').addEventListener('click', function () {
+      showModal(false);
+      setText('concertPitchBadge', state.concertA4.toFixed(1));
+      setText('deskConcertPitch', state.concertA4.toFixed(1));
+    });
+    window.changeConcertPitch = function (delta) {
+      state.concertA4 = Math.min(448, Math.max(430, state.concertA4 + delta));
+      setText('modalPitchDisplay', state.concertA4.toFixed(1));
+    };
+    window.setConcertPitch = function (p) {
+      state.concertA4 = p;
+      setText('modalPitchDisplay', state.concertA4.toFixed(1));
+    };
+
+    /* ---------- tabs ---------- */
+    var TAB_IDS = ['tabTuner', 'tabTrainer', 'tabPieces'];
+    function activateTab(target) {
+      var btns = document.querySelectorAll('.nav-tab');
+      for (var i = 0; i < btns.length; i++) {
+        var active = btns[i].getAttribute('data-tab') === target;
+        var icon = btns[i].querySelector('.nav-icon');
+        var label = btns[i].querySelector('.nav-label');
+        btns[i].className = 'nav-tab btn-haptic flex flex-col items-center gap-1 ' + (active ? 'text-high-voltage' : 'text-zinc-500');
+        if (icon) {
+          icon.className = 'nav-icon w-12 h-7 rounded-full grid place-items-center transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] ' +
+            (active ? 'bg-high-voltage text-void shadow-[0_0_20px_rgba(212,255,0,0.35)]' : 'bg-transparent text-zinc-500');
+        }
+        if (label) label.className = 'nav-label font-mono text-[9px] tracking-wider uppercase' + (active ? ' font-bold' : '');
+      }
+      TAB_IDS.forEach(function (id) {
+        var s = $(id);
+        if (!s) return;
+        if (id === target) {
+          s.classList.remove('hidden');
+          s.classList.remove('panel-in');
+          void s.offsetWidth;
+          s.classList.add('panel-in');
+        } else {
+          s.classList.add('hidden');
+        }
+      });
+      var sc = $('screenContainer');
+      if (sc) sc.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+    window.activateTab = activateTab;
+
+    var navBtns = document.querySelectorAll('.nav-tab');
+    for (var i = 0; i < navBtns.length; i++) {
+      (function (btn) {
+        btn.addEventListener('click', function () { activateTab(btn.getAttribute('data-tab')); });
+      })(navBtns[i]);
+    }
+
+    /* ---------- chassis / native fullscreen ---------- */
+    var toggleChassisBtn = $('toggleChassisBtn');
+    function setNativeFull(on) {
+      document.body.classList.toggle('native-full', on);
+      var lbl = toggleChassisBtn ? toggleChassisBtn.querySelector('span') : null;
+      if (lbl && lbl.id !== 'railNativeLabel') lbl.textContent = on ? 'В ШАССИ' : 'ШАССИ / ЭКРАН';
+      var railLbl = $('railNativeLabel');
+      if (railLbl) railLbl.textContent = on ? 'В ШАССИ' : 'ВО ВЕСЬ ЭКРАН';
+    }
+    toggleChassisBtn && toggleChassisBtn.addEventListener('click', function () {
+      setNativeFull(!document.body.classList.contains('native-full'));
+    });
+    $('nativeExitBtn') && $('nativeExitBtn').addEventListener('click', function () { setNativeFull(false); });
+    $('railNativeBtn') && $('railNativeBtn').addEventListener('click', function () {
+      setNativeFull(!document.body.classList.contains('native-full'));
+    });
+    $('railLaunchBtn') && $('railLaunchBtn').addEventListener('click', function () {
+      activateTab('tabTuner');
+      if (!state.isMicActive) $('micToggleBtn') && $('micToggleBtn').click();
+    });
+
+    /* ---------- waveform + kinetic needle + strobe (single RAF loop) ---------- */
+    var waveStep = 0;
+    var lastT = performance.now();
+
+    function drawWave() {
+      var canvas = $('audioWaveformCanvas');
+      if (!canvas || !canvas.parentElement) return;
+      var ctx2 = canvas.getContext('2d');
+      if (!ctx2) return;
+      var w = canvas.parentElement.clientWidth || 300;
+      var h = canvas.parentElement.clientHeight || 64;
+      if (canvas.width !== w) canvas.width = w;
+      if (canvas.height !== h) canvas.height = h;
+      ctx2.clearRect(0, 0, w, h);
+      ctx2.beginPath();
+      ctx2.lineWidth = 1.6;
+      ctx2.strokeStyle = state.isMicActive ? 'rgba(212,255,0,0.6)' : 'rgba(255,255,255,0.16)';
+      var points = 60;
+      var amp = state.isMicActive ? 1.5 : 0.5;
+      for (var i2 = 0; i2 <= points; i2++) {
+        var x = (i2 / points) * w;
+        var wave = Math.sin(i2 * 0.32 + waveStep) * 0.7 + Math.cos(i2 * 0.71 - waveStep * 1.3) * 0.3;
+        var y = h / 2 + wave * 12 * amp;
+        if (i2 === 0) ctx2.moveTo(x, y); else ctx2.lineTo(x, y);
+      }
+      ctx2.stroke();
+      waveStep += state.isMicActive ? 0.09 : 0.025;
+    }
+
+    function frame(now) {
+      var dt = Math.min(64, now - lastT);
+      lastT = now;
+
+      state.displayCents += (state.currentCents - state.displayCents) * 0.12;
+      var deg = Math.max(-90, Math.min(90, (state.displayCents / 50) * 90));
+      var needle = $('centNeedle');
+      if (needle) needle.setAttribute('transform', 'rotate(' + deg.toFixed(2) + ' 120 118)');
+
+      strobeOffset = (strobeOffset + state.displayCents * 0.9 * (dt / 16.67)) % STROBE_WIDTH;
+      var track = $('strobeTrack');
+      if (track) track.style.transform = 'translateX(' + (-strobeOffset).toFixed(2) + 'px)';
+
+      var lock = Math.abs(state.displayCents) < 1.4;
+      setText('strobeState', lock ? 'СТРОЙ ЗАФИКСИРОВАН ✓' : (state.displayCents < 0 ? 'НИЖЕ · НАТЯНУТЬ ↗' : 'ВЫШЕ · ОСЛАБИТЬ ↘'));
+
+      drawWave();
+      requestAnimationFrame(frame);
+    }
+
+    /* ---------- init ---------- */
+    buildGaugeTicks();
+    buildStrobe();
+    buildScaleButtons();
+    renderPitchUI();
+    updateBowPressure();
+    renderScaleSteps();
+    renderPiece();
+    setTrainMode('fixed');
+    var activeStringBtn = document.querySelector('#stringComparisonRow button[data-string="A"]');
+    if (activeStringBtn) {
+      activeStringBtn.className = 'string-btn btn-haptic glass-card rounded-2xl px-2 py-3 flex flex-col items-center gap-2 transition-all duration-300 border-high-voltage/60 ring-1 ring-high-voltage/40';
+      var al = activeStringBtn.querySelector('.string-label');
+      if (al) al.className = 'string-label font-mono text-[9px] tracking-wider uppercase text-high-voltage';
+    }
+    setText('activeStringSpec', STRINGS.A.label);
+    setText('activeStringHz', STRINGS.A.hz.toFixed(1) + ' Hz');
+    activateTab('tabTuner');
+    requestAnimationFrame(frame);
+  })();
+  </script>
+</body>
+</html>

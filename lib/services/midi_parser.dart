@@ -413,6 +413,8 @@ class MidiParser {
 
   /// Maps any MIDI note into the most natural violin string & 1st position fingering.
   /// Never discards notes outside standard range.
+  static (ViolinString, ViolinFinger) mapMidiToViolin(int midiNote) => _mapMidiToViolin(midiNote);
+
   static (ViolinString, ViolinFinger) _mapMidiToViolin(int midiNote) {
     if (midiNote < 55) {
       // Below G3

@@ -1,5 +1,9 @@
 import 'dart:async';
+import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
+import 'package:image_picker/image_picker.dart';
+import 'widgets/score_camera_overlay.dart';
+import 'widgets/audio_transcribe_sheet.dart';
 import 'package:flutter/material.dart';
 import '../audio_engine.dart';
 import '../models/song_model.dart';
@@ -25,12 +29,14 @@ enum RepertoireCategory {
 class SongPracticeScreen extends StatefulWidget {
   final AudioEngine audioEngine;
   final DetectedNoteInfo? currentNote;
+  final ValueNotifier<DetectedNoteInfo?>? noteNotifier;
   final bool isMobileMode;
 
   const SongPracticeScreen({
     super.key,
     required this.audioEngine,
-    required this.currentNote,
+    this.currentNote,
+    this.noteNotifier,
     this.isMobileMode = false,
   });
 
@@ -49,12 +55,30 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
   String _soundErrorMessage = '';
   String? _legatoFeedback;
   bool _isAccompanimentOn = true;
+  double _playbackSpeed = 1.0;
+  static const List<double> _speedOptions = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
+
+  void _cyclePlaybackSpeed() {
+    setState(() {
+      final idx = _speedOptions.indexOf(_playbackSpeed);
+      final nextIdx = (idx + 1) % _speedOptions.length;
+      _playbackSpeed = _speedOptions[nextIdx];
+      if (_isDemoPlaying && !_isDemoPaused) {
+        _resumeDemo();
+      }
+    });
+  }
 
   int _currentNoteIndex = 0;
   int _playbackTimeMs = 0;
   Timer? _playbackTimer;
   bool _isDemoPlaying = false;
+  bool _isDemoPaused = false;
+  int _lastNotePlayed = -1;
   Timer? _demoTimer;
+  Stopwatch? _demoStopwatch;
+  int _demoFromMs = 0;
+  int _nextNoteIndex = 0;
 
   int _score = 0;
   int _streak = 0;
@@ -68,20 +92,51 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
     _availableSongs = SongLibrary.builtinSongs;
     _currentSong = _availableSongs.first;
     _resetPractice();
+    widget.noteNotifier?.addListener(_onNoteFromNotifier);
+  }
+
+  void _onNoteFromNotifier() {
+    if (!mounted || !_isPlaying || _isDemoPlaying) return;
+    final note = widget.noteNotifier?.value;
+    if (note == null) return;
+
+    if (_practiceMode == PracticeMode.waitNote) {
+      if (_currentNoteIndex < _currentSong.notes.length) {
+        _checkWaitNoteHit(_currentSong.notes[_currentNoteIndex], note);
+      }
+    } else if (_practiceMode == PracticeMode.playAlong) {
+      _checkPlayAlongHit();
+    }
+  }
+
+  @override
+  void didUpdateWidget(SongPracticeScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.noteNotifier != widget.noteNotifier) {
+      oldWidget.noteNotifier?.removeListener(_onNoteFromNotifier);
+      widget.noteNotifier?.addListener(_onNoteFromNotifier);
+    }
   }
 
   @override
   void dispose() {
+    widget.noteNotifier?.removeListener(_onNoteFromNotifier);
     _playbackTimer?.cancel();
     _demoTimer?.cancel();
+    _demoStopwatch?.stop();
+    widget.audioEngine.stopTone();
     super.dispose();
   }
 
   void _resetPractice() {
     _playbackTimer?.cancel();
     _demoTimer?.cancel();
+    _demoStopwatch?.stop();
+    widget.audioEngine.stopTone();
     setState(() {
       _isDemoPlaying = false;
+      _isDemoPaused = false;
+      _lastNotePlayed = -1;
       _isPlaying = false;
       _isSoundError = false;
       _soundErrorMessage = '';
@@ -109,7 +164,7 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
       _playbackTimer = Timer.periodic(const Duration(milliseconds: 30), (timer) {
         if (!_isSoundError) {
           setState(() {
-            _playbackTimeMs += 30;
+            _playbackTimeMs += (30 * _playbackSpeed).round();
             _checkPlayAlongHit();
 
             if (_playbackTimeMs >= _currentSong.totalDurationMs) {
@@ -123,55 +178,123 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
   }
 
 
-  void _startDemo() {
+  void _startDemo({int fromMs = 0}) {
     _playbackTimer?.cancel();
     _demoTimer?.cancel();
+    _demoStopwatch?.stop();
+    widget.audioEngine.stopTone();
+
+    final clampedFromMs = fromMs.clamp(0, _currentSong.totalDurationMs);
+    _demoFromMs = clampedFromMs;
+    _demoStopwatch = Stopwatch()..start();
+
+    // Fast O(1) monotonic cursor for notes
+    _nextNoteIndex = 0;
+    while (_nextNoteIndex < _currentSong.notes.length &&
+        _currentSong.notes[_nextNoteIndex].startTimeMs < clampedFromMs) {
+      _nextNoteIndex++;
+    }
+
+    _lastNotePlayed = -1;
+    int initialActiveIdx = 0;
+    for (int i = 0; i < _currentSong.notes.length; i++) {
+      final n = _currentSong.notes[i];
+      if (clampedFromMs >= n.startTimeMs && clampedFromMs < n.startTimeMs + n.durationMs) {
+        initialActiveIdx = i;
+        _lastNotePlayed = i;
+        final remainingSec = (((n.startTimeMs + n.durationMs - clampedFromMs) / 1000.0) / _playbackSpeed).clamp(0.025, 4.0);
+        final hz = MusicTheory.midiToHz(n.midiNote);
+        widget.audioEngine.playTone(hz, remainingSec);
+        break;
+      }
+    }
+
     setState(() {
       _isPlaying = false;
       _isDemoPlaying = true;
+      _isDemoPaused = false;
       _isSoundError = false;
-      _currentNoteIndex = 0;
-      _playbackTimeMs = 0;
+      _soundErrorMessage = '';
+      _currentNoteIndex = initialActiveIdx;
+      _playbackTimeMs = clampedFromMs;
     });
 
-    int lastNotePlayed = -1;
-    _demoTimer = Timer.periodic(const Duration(milliseconds: 20), (timer) {
+    _demoTimer = Timer.periodic(const Duration(milliseconds: 16), (timer) {
       if (!mounted || !_isDemoPlaying) {
         timer.cancel();
         return;
       }
-      setState(() {
-        _playbackTimeMs += 20;
+      if (_isDemoPaused) return;
 
-        int activeIdx = -1;
-        for (int i = 0; i < _currentSong.notes.length; i++) {
-          final n = _currentSong.notes[i];
-          if (_playbackTimeMs >= n.startTimeMs && _playbackTimeMs < n.startTimeMs + n.durationMs) {
-            activeIdx = i;
-            break;
-          }
+      final elapsedMs = _demoStopwatch?.elapsedMilliseconds ?? 0;
+      final currentTime = _demoFromMs + (elapsedMs * _playbackSpeed).round();
+
+      // Trigger all notes whose startTimeMs has arrived - impossible to skip!
+      while (_nextNoteIndex < _currentSong.notes.length) {
+        final note = _currentSong.notes[_nextNoteIndex];
+        if (note.startTimeMs <= currentTime) {
+          _lastNotePlayed = _nextNoteIndex;
+          _currentNoteIndex = _nextNoteIndex;
+          final durSec = ((note.durationMs / 1000.0) / _playbackSpeed).clamp(0.025, 4.0);
+          final hz = MusicTheory.midiToHz(note.midiNote);
+          widget.audioEngine.playTone(hz, durSec);
+          _nextNoteIndex++;
+        } else {
+          break;
         }
+      }
 
-        if (activeIdx != -1) {
-          _currentNoteIndex = activeIdx;
-          if (lastNotePlayed != activeIdx) {
-            lastNotePlayed = activeIdx;
-            final note = _currentSong.notes[activeIdx];
-            final hz = MusicTheory.midiToHz(note.midiNote);
-            final durSec = (note.durationMs / 1000.0).clamp(0.08, 4.0);
-            widget.audioEngine.playTone(hz, durSec);
-          }
-        } else if (_playbackTimeMs >= _currentSong.totalDurationMs + 400) {
+      setState(() {
+        _playbackTimeMs = currentTime;
+        if (_playbackTimeMs >= _currentSong.totalDurationMs + 400) {
           _stopDemo();
         }
       });
     });
   }
 
+  void _pauseDemo() {
+    _demoTimer?.cancel();
+    _demoStopwatch?.stop();
+    widget.audioEngine.stopTone();
+    setState(() {
+      _isDemoPaused = true;
+    });
+  }
+
+  void _resumeDemo() {
+    _startDemo(fromMs: _playbackTimeMs);
+  }
+
+  void _seekDemo(int targetMs) {
+    widget.audioEngine.stopTone();
+    final clamped = targetMs.clamp(0, _currentSong.totalDurationMs);
+    if (_isDemoPlaying) {
+      _startDemo(fromMs: clamped);
+    } else {
+      setState(() {
+        _playbackTimeMs = clamped;
+        for (int i = 0; i < _currentSong.notes.length; i++) {
+          final n = _currentSong.notes[i];
+          if (clamped >= n.startTimeMs && clamped < n.startTimeMs + n.durationMs) {
+            _currentNoteIndex = i;
+            break;
+          }
+        }
+      });
+    }
+  }
+
   void _stopDemo() {
     _demoTimer?.cancel();
+    _demoStopwatch?.stop();
+    widget.audioEngine.stopTone();
     setState(() {
       _isDemoPlaying = false;
+      _isDemoPaused = false;
+      _playbackTimeMs = 0;
+      _lastNotePlayed = -1;
+      _currentNoteIndex = 0;
     });
   }
   void _pausePlayback() {
@@ -310,48 +433,125 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        backgroundColor: AppleViolinTheme.cardDark,
-        shape: RoundedRectangleBorder(borderRadius: AppleViolinTheme.cardRadius),
-        title: const Text('🎉 Произведение сыграно!', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+        backgroundColor: AppleViolinTheme.elevatedHigher,
+        shape: RoundedRectangleBorder(
+          borderRadius: AppleViolinTheme.bentoRadius,
+          side: const BorderSide(color: AppleViolinTheme.borderSubtle),
+        ),
+        title: const Text(
+          '🎉 Произведение сыграно!',
+          style: TextStyle(color: AppleViolinTheme.headline, fontWeight: FontWeight.w800),
+        ),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text('Произведение: ${_currentSong.title}', style: const TextStyle(color: AppleViolinTheme.subtext)),
-            const SizedBox(height: 12),
-            Text('Точность: $accuracy%', style: const TextStyle(fontSize: 22, color: AppleViolinTheme.appleGreen, fontWeight: FontWeight.bold)),
-            Text('Очки: $_score', style: const TextStyle(fontSize: 18, color: AppleViolinTheme.appleOrange, fontWeight: FontWeight.bold)),
-            Text('Макс. серия чистых нот: $_bestStreak', style: const TextStyle(color: Colors.white60)),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Expanded(child: _telemetryCell('ТОЧНОСТЬ', '$accuracy%', AppleViolinTheme.hyperEmerald)),
+                Expanded(child: _telemetryCell('ОЧКИ', '$_score', AppleViolinTheme.solarAmber)),
+                Expanded(child: _telemetryCell('СЕРИЯ', '$_bestStreak', AppleViolinTheme.highVoltageLime)),
+              ],
+            ),
           ],
         ),
         actions: [
-          TextButton(
-            onPressed: () {
+          GestureDetector(
+            onTap: () {
               Navigator.pop(ctx);
               _resetPractice();
             },
-            child: const Text('Сыграть снова', style: TextStyle(color: AppleViolinTheme.appleBlue, fontWeight: FontWeight.bold)),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 12),
+              decoration: AppleViolinTheme.primaryCtaDecoration(),
+              child: Text(
+                'Сыграть снова',
+                style: TextStyle(
+                  fontFamily: AppleViolinTheme.fontMono,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.8,
+                  color: AppleViolinTheme.voidBg,
+                ),
+              ),
+            ),
           ),
         ],
       ),
     );
   }
 
-  Future<void> _pickScoreImageAndOmr() async {
+  void _pickScoreImageAndOmr() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => ScoreCameraOverlay(
+        onClose: () => Navigator.pop(ctx),
+        onCapturePhoto: () async {
+          Navigator.pop(ctx);
+          try {
+            final picker = ImagePicker();
+            final photo = await picker.pickImage(source: ImageSource.camera);
+            if (photo != null) {
+              final bytes = await photo.readAsBytes();
+              final title = photo.name.replaceAll(RegExp(r'\.[a-zA-Z0-9]+$'), '');
+              _processOmrBytes(bytes, title.isEmpty ? 'Фото партитуры' : title);
+            }
+          } catch (e) {
+            _showErrorSnackbar('Ошибка камеры: $e');
+          }
+        },
+        onPickGallery: () async {
+          Navigator.pop(ctx);
+          try {
+            final picker = ImagePicker();
+            final image = await picker.pickImage(source: ImageSource.gallery);
+            if (image != null) {
+              final bytes = await image.readAsBytes();
+              final title = image.name.replaceAll(RegExp(r'\.[a-zA-Z0-9]+$'), '');
+              _processOmrBytes(bytes, title.isEmpty ? 'Партитура из галереи' : title);
+            }
+          } catch (e) {
+            _showErrorSnackbar('Ошибка галереи: $e');
+          }
+        },
+        onPickFile: () async {
+          Navigator.pop(ctx);
+          try {
+            final result = await FilePicker.pickFiles(
+              dialogTitle: 'Выберите фото партитуры',
+              type: FileType.custom,
+              allowedExtensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp'],
+            );
+            if (result.isNotEmpty) {
+              final file = result.first;
+              final bytes = await file.readAsBytes();
+              final title = file.name.replaceAll(RegExp(r'\.[a-zA-Z0-9]+$'), '');
+              _processOmrBytes(bytes, title);
+            }
+          } catch (e) {
+            _showErrorSnackbar('Ошибка выбора файла: $e');
+          }
+        },
+      ),
+    );
+  }
+
+  void _showErrorSnackbar(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        backgroundColor: AppleViolinTheme.appleRed,
+        content: Text(message),
+      ),
+    );
+  }
+
+  Future<void> _processOmrBytes(Uint8List bytes, String title) async {
     try {
-      final files = await FilePicker.pickFiles(
-        dialogTitle: 'Выберите фото или скан партитуры для OMR-распознавания',
-        type: FileType.custom,
-        allowedExtensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp'],
-      );
-
-      if (files.isEmpty) return;
-
-      final pickedFile = files.first;
-      final bytes = await pickedFile.readAsBytes();
-      final fileName = pickedFile.name;
-      final title = fileName.replaceAll(RegExp(r'\.[a-zA-Z0-9]+$'), '');
-
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -381,14 +581,7 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
         );
       }
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            backgroundColor: AppleViolinTheme.appleRed,
-            content: Text('Ошибка распознавания фото: $e'),
-          ),
-        );
-      }
+      _showErrorSnackbar('Ошибка распознавания фото: $e');
     }
   }
 
@@ -421,6 +614,34 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
         );
       }
     }
+  }
+
+  void _pickAudioAndTranscribe() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => AudioTranscribeSheet(
+        onClose: () => Navigator.pop(ctx),
+        onSongTranscribed: (song, report) {
+          setState(() {
+            _availableSongs = [song, ..._availableSongs];
+            _currentSong = song;
+            _selectedCategory = RepertoireCategory.custom;
+            _resetPractice();
+          });
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                backgroundColor: AppleViolinTheme.appleGreen,
+                content: Text('✓ '),
+                duration: const Duration(seconds: 4),
+              ),
+            );
+          }
+        },
+      ),
+    );
   }
 
   Future<void> _pickCustomMidi() async {
@@ -479,7 +700,7 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final note = widget.currentNote;
+    final note = widget.noteNotifier?.value ?? widget.currentNote;
     final isMobile = widget.isMobileMode;
 
     SongNote? targetNote;
@@ -491,7 +712,7 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
       }
     }
 
-    if (_practiceMode == PracticeMode.waitNote && targetNote != null && note != null && _isPlaying) {
+    if (widget.noteNotifier == null && _practiceMode == PracticeMode.waitNote && targetNote != null && note != null && _isPlaying && !_isDemoPlaying) {
       _checkWaitNoteHit(targetNote, note);
     }
 
@@ -503,162 +724,180 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
       physics: const BouncingScrollPhysics(),
       padding: EdgeInsets.symmetric(
         horizontal: isMobile ? 16 : 24,
-        vertical: isMobile ? 8 : 16,
+        vertical: isMobile ? 12 : 20,
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // Header: INTERACTIVE REPERTOIRE / Пьесы + Actions
+          _buildHeadingSpine(isMobile),
+          const SizedBox(height: 18),
+
+          // Import actions — glass pills (OMR · MIDI · AI Audio)
           Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
               Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: const [
-                    Text(
-                      'INTERACTIVE REPERTOIRE',
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w700,
-                        letterSpacing: 1.2,
-                        color: AppleViolinTheme.subtext,
-                      ),
-                    ),
-                    SizedBox(height: 2),
-                    Text(
-                      'Пьесы',
-                      style: TextStyle(
-                        fontSize: 28,
-                        fontWeight: FontWeight.w800,
-                        letterSpacing: -0.8,
-                        color: Colors.white,
-                      ),
-                    ),
-                  ],
+                child: _buildImportPill(
+                  icon: Icons.document_scanner_rounded,
+                  label: 'НОТЫ (ФОТО)',
+                  accent: AppleViolinTheme.electricCobalt,
+                  tint: AppleViolinTheme.electricCobalt,
+                  onTap: _pickScoreImageAndOmr,
                 ),
               ),
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  GestureDetector(
-                    onTap: _pickScoreImageAndOmr,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                      decoration: BoxDecoration(
-                        color: AppleViolinTheme.appleBlue.withValues(alpha: 0.18),
-                        borderRadius: BorderRadius.circular(16),
-                        border: Border.all(color: AppleViolinTheme.appleBlue.withValues(alpha: 0.45)),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: const [
-                          Icon(Icons.document_scanner_rounded, size: 13, color: AppleViolinTheme.appleBlue),
-                          SizedBox(width: 4),
-                          Text(
-                            'OMR',
-                            style: TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w700,
-                              color: AppleViolinTheme.appleBlue,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 6),
-                  GestureDetector(
-                    onTap: _pickCustomMidi,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                      decoration: BoxDecoration(
-                        color: AppleViolinTheme.elevatedDark,
-                        borderRadius: BorderRadius.circular(16),
-                        border: Border.all(color: Colors.white12),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: const [
-                          Icon(Icons.upload_file_rounded, size: 13, color: Colors.white70),
-                          SizedBox(width: 4),
-                          Text(
-                            'MIDI',
-                            style: TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600,
-                              color: Colors.white,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ],
+              const SizedBox(width: 6),
+              Expanded(
+                child: _buildImportPill(
+                  icon: Icons.upload_file_rounded,
+                  label: 'MIDI',
+                  accent: AppleViolinTheme.headline,
+                  onTap: _pickCustomMidi,
+                ),
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: _buildImportPill(
+                  icon: Icons.graphic_eq_rounded,
+                  label: 'АУДИО AI',
+                  accent: AppleViolinTheme.hyperEmerald,
+                  tint: AppleViolinTheme.hyperEmerald,
+                  onTap: _pickAudioAndTranscribe,
+                ),
               ),
             ],
           ),
-          const SizedBox(height: 12),
-
-          // iOS Segmented Control
-          _buildSegmentedControl(),
           const SizedBox(height: 14),
 
-          // Active Piece Card
+          // Repertoire category filter
+          _buildSegmentedControl(),
+          const SizedBox(height: 16),
+
+          // Active piece — glass bento card
           Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: AppleViolinTheme.cardDark,
-              borderRadius: AppleViolinTheme.cardRadius,
-              border: Border.all(color: Colors.white10),
-              boxShadow: const [AppleViolinTheme.softShadow],
+            padding: const EdgeInsets.all(18),
+            decoration: AppleViolinTheme.glassDecoration(
+              highlighted: true,
+              radius: AppleViolinTheme.bentoRadius,
             ),
+            clipBehavior: Clip.antiAlias,
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                Stack(
+                  clipBehavior: Clip.none,
                   children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: AppleViolinTheme.appleGreen.withValues(alpha: 0.15),
-                              borderRadius: BorderRadius.circular(6),
-                            ),
-                            child: const Text(
-                              'В ПРОЦЕССЕ',
-                              style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: AppleViolinTheme.appleGreen, letterSpacing: 0.8),
+                    Positioned(
+                      top: -80,
+                      right: -70,
+                      child: IgnorePointer(
+                        child: Container(
+                          width: 220,
+                          height: 220,
+                          decoration: const BoxDecoration(
+                            shape: BoxShape.circle,
+                            gradient: RadialGradient(
+                              colors: [Color(0x292563EB), Color(0x002563EB)],
                             ),
                           ),
-                          const SizedBox(height: 4),
-                          Text(
-                            _currentSong.title,
-                            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          Text(
-                            '${_currentSong.composer} • Темп: ${_currentSong.tempoBpm} BPM',
-                            style: const TextStyle(fontSize: 12, color: AppleViolinTheme.subtext),
-                          ),
-                        ],
+                        ),
                       ),
                     ),
                     Column(
-                      crossAxisAlignment: CrossAxisAlignment.end,
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(
-                          '$accuracy%',
-                          style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, fontFamily: 'monospace', color: AppleViolinTheme.appleGreen),
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  _microLabel(
+                                    'ПЬЕСА $_currentSongIndex · ${_currentSong.notes.length} НОТ',
+                                    color: AppleViolinTheme.highVoltageLime,
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    _currentSong.title,
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                      fontSize: 20,
+                                      height: 1.12,
+                                      fontWeight: FontWeight.w800,
+                                      letterSpacing: -0.6,
+                                      color: AppleViolinTheme.headline,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 5),
+                                  _microLabel('${_currentSong.composer} · ${_currentSong.tempoBpm} BPM'),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Container(
+                              width: 38,
+                              height: 38,
+                              decoration: BoxDecoration(
+                                color: const Color(0x0AFFFFFF),
+                                borderRadius: BorderRadius.circular(14),
+                                border: Border.all(color: AppleViolinTheme.borderSubtle),
+                              ),
+                              child: const Icon(Icons.music_note_rounded, size: 18, color: AppleViolinTheme.highVoltageLime),
+                            ),
+                          ],
                         ),
-                        const Text(
-                          'ЧИСТОТА',
-                          style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: AppleViolinTheme.subtext, letterSpacing: 0.8),
+                        const SizedBox(height: 12),
+                        Wrap(
+                          spacing: 6,
+                          runSpacing: 6,
+                          children: [
+                            _statusPill(
+                              label: _isDemoPlaying ? 'ДЕМО' : (_isPlaying ? 'ИГРАЮ' : 'ПАУЗА'),
+                              color: (_isPlaying || _isDemoPlaying)
+                                  ? AppleViolinTheme.highVoltageLime
+                                  : AppleViolinTheme.subtext,
+                              pulse: _isPlaying || _isDemoPlaying,
+                            ),
+                            _actionPill(
+                              icon: Icons.shutter_speed_rounded,
+                              label: 'x',
+                              active: _playbackSpeed != 1.0,
+                              activeColor: AppleViolinTheme.appleTeal,
+                              onTap: _cyclePlaybackSpeed,
+                            ),
+                            _actionPill(
+                              icon: _practiceMode == PracticeMode.waitNote
+                                  ? Icons.touch_app_rounded
+                                  : Icons.speed_rounded,
+                              label: _practiceMode == PracticeMode.waitNote ? 'ЖДАТЬ НОТУ' : 'В ТЕМПЕ',
+                              active: true,
+                              activeColor: AppleViolinTheme.solarAmber,
+                              onTap: () {
+                                setState(() {
+                                  _practiceMode = _practiceMode == PracticeMode.waitNote
+                                      ? PracticeMode.playAlong
+                                      : PracticeMode.waitNote;
+                                  _resetPractice();
+                                });
+                              },
+                            ),
+                            _actionPill(
+                              icon: Icons.volume_up_rounded,
+                              label: _isAccompanimentOn ? 'Ф-НО ВКЛ' : 'Ф-НО ВЫКЛ',
+                              active: _isAccompanimentOn,
+                              activeColor: AppleViolinTheme.hyperEmerald,
+                              onTap: () {
+                                setState(() {
+                                  _isAccompanimentOn = !_isAccompanimentOn;
+                                });
+                              },
+                            ),
+                            _actionPill(
+                              icon: Icons.save_alt_rounded,
+                              label: 'ЭКСПОРТ MIDI',
+                              onTap: _exportCurrentSongMidi,
+                            ),
+                          ],
                         ),
                       ],
                     ),
@@ -666,69 +905,80 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
                 ),
                 const SizedBox(height: 12),
 
+                // Full Piece Audio Player Bar
+                _buildAudioPlayerBar(isMobile),
+                const SizedBox(height: 10),
+
                 // Musical Staff View (Нотный стан с лигами Безье)
                 MusicalStaffView(
                   targetMidi: targetNote?.midiNote,
                   nextTargetMidi: nextTargetNote?.midiNote,
-                  playedMidi: note?.midiNote,
-                  isScratching: note?.isScratching ?? false,
-                  isInTune: note?.isInTune ?? false,
+                  playedMidi: _isDemoPlaying ? null : note?.midiNote,
+                  isScratching: _isDemoPlaying ? false : (note?.isScratching ?? false),
+                  isInTune: _isDemoPlaying ? true : (note?.isInTune ?? false),
                   isSlurred: targetNote?.isSlurred ?? false,
                   bowDirection: targetNote?.bowDirection,
                   noteLabel: targetNote != null ? '${targetNote.noteName} (Струна ${targetNote.string.name})' : null,
                   height: isMobile ? 86 : 96,
                   compact: isMobile,
                 ),
-                const SizedBox(height: 10),
+                const SizedBox(height: 12),
 
-                // Feedback Banners (Legato, Error, Streak)
-                if (_legatoFeedback != null)
-                  Container(
-                    margin: const EdgeInsets.only(bottom: 8),
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: AppleViolinTheme.appleBlue.withValues(alpha: 0.2),
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: AppleViolinTheme.appleBlue.withValues(alpha: 0.5)),
-                    ),
-                    child: Text(_legatoFeedback!, style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold)),
-                  ),
+                // Micro-telemetry readout
+                _telemetryRow(
+                  targetLabel: targetNote?.noteName ?? '—',
+                  heardLabel: _isDemoPlaying ? 'ЭТАЛОН' : (note == null ? '—' : note.solfegeBase),
+                  accuracy: accuracy,
+                  totalNotes: totalNotes,
+                ),
 
-                if (_isSoundError)
-                  Container(
-                    margin: const EdgeInsets.only(bottom: 8),
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: AppleViolinTheme.appleRed.withValues(alpha: 0.2),
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: AppleViolinTheme.appleRed.withValues(alpha: 0.5)),
-                    ),
-                    child: Text(_soundErrorMessage, style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold)),
-                  ),
+                // Feedback banners (legato / error)
+                if (_legatoFeedback != null && !_isDemoPlaying)
+                  _feedbackBanner(_legatoFeedback!, AppleViolinTheme.hyperEmerald, Icons.auto_awesome_rounded),
+
+                if (_isSoundError && !_isDemoPlaying)
+                  _feedbackBanner(_soundErrorMessage, AppleViolinTheme.crimsonScratch, Icons.warning_amber_rounded),
 
                 // Note Highway View (Бегущая интерактивная дорожка)
                 _buildHighwayTrack(targetNote, isMobile),
                 const SizedBox(height: 12),
 
-                // Playback Controls
+                // Playback controls
                 _buildPlaybackControls(),
+                const SizedBox(height: 12),
+
+                // Footer tempo telemetry
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    _microLabel('ТЕМП ПРОИЗВЕДЕНИЯ', color: AppleViolinTheme.subtext),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          '${_currentSong.tempoBpm}',
+                          style: AppleViolinTheme.telemetry.copyWith(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 0.5,
+                            color: AppleViolinTheme.headline,
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        _microLabel('BPM'),
+                      ],
+                    ),
+                  ],
+                ),
               ],
             ),
           ),
           const SizedBox(height: 18),
 
-          // Repertoire Catalog
-          const Padding(
-            padding: EdgeInsets.only(left: 4, bottom: 8),
-            child: Text(
-              'ДОСТУПНЫЕ ПРОИЗВЕДЕНИЯ',
-              style: TextStyle(
-                fontSize: 11,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 1.2,
-                color: AppleViolinTheme.subtext,
-              ),
-            ),
+          // Repertoire catalog
+          Padding(
+            padding: const EdgeInsets.only(left: 2, bottom: 10),
+            child: _microLabel('ДОСТУПНЫЕ ПРОИЗВЕДЕНИЯ'),
           ),
 
           ..._filteredSongs.map((song) => _buildSongCatalogCard(song)),
@@ -738,14 +988,471 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
     );
   }
 
+  Widget _buildAudioPlayerBar(bool isMobile) {
+    final totalMs = _currentSong.totalDurationMs;
+    final currentMs = _playbackTimeMs.clamp(0, totalMs > 0 ? totalMs : 1);
+    final curSec = currentMs ~/ 1000;
+    final totSec = totalMs ~/ 1000;
+    final curMin = curSec ~/ 60;
+    final curSecRem = curSec % 60;
+    final totMin = totSec ~/ 60;
+    final totSecRem = totSec % 60;
+    final timeStr =
+        '${curMin.toString().padLeft(1, "0")}:${curSecRem.toString().padLeft(2, "0")} / ${totMin.toString().padLeft(1, "0")}:${totSecRem.toString().padLeft(2, "0")}';
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: AppleViolinTheme.highVoltageLime.withValues(alpha: _isDemoPlaying ? 0.08 : 0.04),
+        borderRadius: AppleViolinTheme.cardRadius,
+        border: Border.all(
+          color: _isDemoPlaying
+              ? AppleViolinTheme.highVoltageLime.withValues(alpha: 0.40)
+              : AppleViolinTheme.borderSubtle,
+        ),
+      ),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              GestureDetector(
+                onTap: () {
+                  if (_isDemoPlaying) {
+                    if (_isDemoPaused) {
+                      _resumeDemo();
+                    } else {
+                      _pauseDemo();
+                    }
+                  } else {
+                    _startDemo();
+                  }
+                },
+                child: Container(
+                  width: 32,
+                  height: 32,
+                  decoration: BoxDecoration(
+                    color: _isDemoPlaying
+                        ? AppleViolinTheme.highVoltageLime
+                        : const Color(0x14FFFFFF),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(
+                    (_isDemoPlaying && !_isDemoPaused)
+                        ? Icons.pause_rounded
+                        : Icons.play_arrow_rounded,
+                    size: 18,
+                    color: _isDemoPlaying
+                        ? AppleViolinTheme.voidBg
+                        : AppleViolinTheme.headline,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _isDemoPlaying
+                          ? (_isDemoPaused ? "⏸ ПАУЗА: ${_currentSong.title}" : "🔊 ЗВУЧИТ ЭТАЛОН: ${_currentSong.title}")
+                          : "ПРОСЛУШАТЬ ПРОИЗВЕДЕНИЕ",
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: AppleViolinTheme.telemetry.copyWith(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                        color: _isDemoPlaying ? AppleViolinTheme.highVoltageLime : AppleViolinTheme.headline,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      "${_currentSong.composer} · ${_currentSong.notes.length} нот",
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: AppleViolinTheme.telemetry.copyWith(
+                        fontSize: 9,
+                        color: AppleViolinTheme.subtext,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Text(
+                timeStr,
+                style: TextStyle(
+                  fontFamily: AppleViolinTheme.fontMono,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  color: _isDemoPlaying ? AppleViolinTheme.highVoltageLime : AppleViolinTheme.subtext,
+                ),
+              ),
+              if (_isDemoPlaying) ...[
+                const SizedBox(width: 8),
+                GestureDetector(
+                  onTap: _stopDemo,
+                  child: const Icon(
+                    Icons.stop_rounded,
+                    size: 20,
+                    color: AppleViolinTheme.subtext,
+                  ),
+                ),
+              ],
+            ],
+          ),
+          const SizedBox(height: 6),
+          SliderTheme(
+            data: SliderTheme.of(context).copyWith(
+              trackHeight: 3.5,
+              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
+              overlayShape: const RoundSliderOverlayShape(overlayRadius: 12),
+              activeTrackColor: AppleViolinTheme.highVoltageLime,
+              inactiveTrackColor: const Color(0x1AFFFFFF),
+              thumbColor: AppleViolinTheme.highVoltageLime,
+            ),
+            child: Slider(
+              value: currentMs.toDouble(),
+              min: 0.0,
+              max: (totalMs > 0 ? totalMs.toDouble() : 1.0),
+              onChanged: (val) {
+                _seekDemo(val.toInt());
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Design-language helpers (obsidian bento / editorial spine / micro-telemetry)
+  // ---------------------------------------------------------------------------
+
+  int get _currentSongIndex {
+    final idx = _availableSongs.indexWhere((s) => s.id == _currentSong.id);
+    return idx >= 0 ? idx + 1 : 1;
+  }
+
+  Widget _microLabel(String text, {Color? color}) {
+    return Text(
+      text,
+      style: AppleViolinTheme.telemetry.copyWith(color: color ?? AppleViolinTheme.subtext),
+    );
+  }
+
+  Widget _buildHeadingSpine(bool isMobile) {
+    final headingSize = isMobile ? 29.0 : 34.0;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _microLabel('РЕПЕРТУАР'),
+              const SizedBox(height: 10),
+              Text.rich(
+                TextSpan(
+                  children: [
+                    TextSpan(
+                      text: 'Произведения ',
+                      style: TextStyle(
+                        fontSize: headingSize,
+                        height: 1.0,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: -1.0,
+                        color: AppleViolinTheme.headline,
+                      ),
+                    ),
+                    TextSpan(
+                      text: 'на слух',
+                      style: TextStyle(
+                        fontSize: headingSize,
+                        height: 1.0,
+                        fontWeight: FontWeight.w400,
+                        fontStyle: FontStyle.italic,
+                        letterSpacing: -0.4,
+                        color: AppleViolinTheme.subtext,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(width: 12),
+        Container(
+          margin: const EdgeInsets.only(top: 2),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: AppleViolinTheme.glassCtaDecoration(radius: AppleViolinTheme.pillRadius),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _microLabel('BPM'),
+              const SizedBox(width: 6),
+              Text(
+                '${_currentSong.tempoBpm}',
+                style: AppleViolinTheme.telemetry.copyWith(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  color: AppleViolinTheme.highVoltageLime,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildImportPill({
+    required IconData icon,
+    required String label,
+    required Color accent,
+    required VoidCallback onTap,
+    Color? tint,
+  }) {
+    final decoration = tint == null
+        ? AppleViolinTheme.glassCtaDecoration(radius: AppleViolinTheme.pillRadius)
+        : BoxDecoration(
+            color: tint.withValues(alpha: 0.12),
+            borderRadius: AppleViolinTheme.pillRadius,
+            border: Border.all(color: tint.withValues(alpha: 0.38)),
+          );
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+        decoration: decoration,
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, size: 15, color: accent),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: AppleViolinTheme.telemetry.copyWith(
+                  color: AppleViolinTheme.headline,
+                  letterSpacing: 1.0,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _statusPill({required String label, required Color color, bool pulse = false}) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
+      decoration: AppleViolinTheme.glassCtaDecoration(radius: AppleViolinTheme.pillRadius),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          pulse
+              ? _PulseDot(color: color)
+              : Container(
+                  width: 7,
+                  height: 7,
+                  decoration: BoxDecoration(shape: BoxShape.circle, color: color),
+                ),
+          const SizedBox(width: 7),
+          Text(
+            label,
+            style: AppleViolinTheme.telemetry.copyWith(color: color, letterSpacing: 0.8),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _actionPill({
+    required IconData icon,
+    required String label,
+    bool active = false,
+    Color? activeColor,
+    VoidCallback? onTap,
+  }) {
+    final accent = activeColor ?? AppleViolinTheme.highVoltageLime;
+    final fg = active ? accent : AppleViolinTheme.subtext;
+    final decoration = active
+        ? BoxDecoration(
+            color: accent.withValues(alpha: 0.12),
+            borderRadius: AppleViolinTheme.pillRadius,
+            border: Border.all(color: accent.withValues(alpha: 0.45)),
+          )
+        : AppleViolinTheme.glassCtaDecoration(radius: AppleViolinTheme.pillRadius);
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: AnimatedContainer(
+        duration: AppleViolinTheme.motionFast,
+        curve: AppleViolinTheme.easeOutExpo,
+        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
+        decoration: decoration,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 13, color: fg),
+            const SizedBox(width: 6),
+            Text(
+              label,
+              style: AppleViolinTheme.telemetry.copyWith(color: fg, letterSpacing: 0.6),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _pillButton({
+    required IconData icon,
+    required String label,
+    required bool primary,
+    required VoidCallback onTap,
+    bool active = false,
+  }) {
+    final decoration = primary
+        ? AppleViolinTheme.primaryCtaDecoration()
+        : (active
+            ? BoxDecoration(
+                color: AppleViolinTheme.highVoltageLime.withValues(alpha: 0.14),
+                borderRadius: AppleViolinTheme.pillRadius,
+                border: Border.all(color: AppleViolinTheme.highVoltageLime.withValues(alpha: 0.5)),
+              )
+            : AppleViolinTheme.glassCtaDecoration(radius: AppleViolinTheme.pillRadius));
+    final fg = primary
+        ? AppleViolinTheme.voidBg
+        : (active ? AppleViolinTheme.highVoltageLime : AppleViolinTheme.headline);
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: AnimatedContainer(
+        duration: AppleViolinTheme.motionFast,
+        curve: AppleViolinTheme.easeOutExpo,
+        padding: const EdgeInsets.symmetric(vertical: 13, horizontal: 12),
+        decoration: decoration,
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, size: 16, color: fg),
+            const SizedBox(width: 7),
+            Text(
+              label,
+              style: TextStyle(
+                fontFamily: AppleViolinTheme.fontMono,
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 1.0,
+                color: fg,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _glassIconButton({required IconData icon, required VoidCallback onTap}) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        width: 46,
+        height: 46,
+        decoration: AppleViolinTheme.glassCtaDecoration(radius: AppleViolinTheme.pillRadius),
+        child: Icon(icon, size: 18, color: AppleViolinTheme.subtext),
+      ),
+    );
+  }
+
+  Widget _telemetryRow({
+    required String targetLabel,
+    required String heardLabel,
+    required int accuracy,
+    required int totalNotes,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 11, horizontal: 13),
+      decoration: BoxDecoration(
+        color: const Color(0x0AFFFFFF),
+        borderRadius: AppleViolinTheme.cardRadius,
+        border: Border.all(color: AppleViolinTheme.borderSubtle),
+      ),
+      child: Row(
+        children: [
+          Expanded(child: _telemetryCell('ЦЕЛЬ', targetLabel, AppleViolinTheme.highVoltageLime)),
+          Expanded(child: _telemetryCell('ЗВУК', heardLabel, AppleViolinTheme.solarAmber)),
+          Expanded(child: _telemetryCell('ТОЧНОСТЬ', '$accuracy%', AppleViolinTheme.hyperEmerald)),
+          Expanded(child: _telemetryCell('ШАГ', '${_currentNoteIndex + 1}/$totalNotes', AppleViolinTheme.headline)),
+        ],
+      ),
+    );
+  }
+
+  Widget _telemetryCell(String label, String value, Color valueColor) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: AppleViolinTheme.telemetry.copyWith(fontSize: 9, letterSpacing: 1.0),
+        ),
+        const SizedBox(height: 3),
+        Text(
+          value,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(
+            fontFamily: AppleViolinTheme.fontMono,
+            fontSize: 14,
+            height: 1.0,
+            fontWeight: FontWeight.w700,
+            letterSpacing: -0.2,
+            color: valueColor,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _feedbackBanner(String text, Color color, IconData icon) {
+    return AnimatedContainer(
+      duration: AppleViolinTheme.motionFast,
+      curve: AppleViolinTheme.easeOutExpo,
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: AppleViolinTheme.btnRadius,
+        border: Border.all(color: color.withValues(alpha: 0.45)),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, size: 15, color: color),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              text,
+              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppleViolinTheme.headline),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildSegmentedControl() {
     return Container(
-      padding: const EdgeInsets.all(3),
-      decoration: BoxDecoration(
-        color: AppleViolinTheme.cardDark,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
-      ),
+      padding: const EdgeInsets.all(4),
+      decoration: AppleViolinTheme.glassDecoration(radius: AppleViolinTheme.pillRadius),
       child: Row(
         children: [
           _buildSegmentTab('Все', RepertoireCategory.all),
@@ -766,21 +1473,36 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
             _selectedCategory = cat;
           });
         },
+        behavior: HitTestBehavior.opaque,
         child: AnimatedContainer(
-          duration: const Duration(milliseconds: 180),
-          padding: const EdgeInsets.symmetric(vertical: 6),
+          duration: AppleViolinTheme.motionFast,
+          curve: AppleViolinTheme.easeOutExpo,
+          padding: const EdgeInsets.symmetric(vertical: 8),
           decoration: BoxDecoration(
-            color: isSelected ? AppleViolinTheme.elevatedDark : Colors.transparent,
-            borderRadius: BorderRadius.circular(9),
-            boxShadow: isSelected ? const [BoxShadow(color: Colors.black26, blurRadius: 4)] : null,
+            color: isSelected ? AppleViolinTheme.highVoltageLime : Colors.transparent,
+            borderRadius: AppleViolinTheme.pillRadius,
+            boxShadow: isSelected
+                ? [
+                    BoxShadow(
+                      color: AppleViolinTheme.highVoltageLime.withValues(alpha: 0.35),
+                      blurRadius: 16,
+                      spreadRadius: -2,
+                    ),
+                  ]
+                : null,
           ),
           child: Center(
             child: Text(
               title,
+              textAlign: TextAlign.center,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
               style: TextStyle(
+                fontFamily: AppleViolinTheme.fontMono,
                 fontSize: 11,
-                fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
-                color: isSelected ? Colors.white : AppleViolinTheme.subtext,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.4,
+                color: isSelected ? AppleViolinTheme.voidBg : AppleViolinTheme.subtext,
               ),
             ),
           ),
@@ -792,11 +1514,8 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
   Widget _buildHighwayTrack(SongNote? targetNote, bool isMobile) {
     return Container(
       height: 100,
-      decoration: BoxDecoration(
-        color: const Color(0xFF141416),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: Colors.white12),
-      ),
+      decoration: AppleViolinTheme.glassDecoration(radius: AppleViolinTheme.cardRadius),
+      clipBehavior: Clip.antiAlias,
       child: Stack(
         children: [
           CustomPaint(
@@ -806,19 +1525,24 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
               currentNoteIndex: _currentNoteIndex,
               playbackTimeMs: _playbackTimeMs,
               practiceMode: _practiceMode,
+              isDemoPlaying: _isDemoPlaying,
             ),
           ),
-          // Playhead Red Laser line
+          // Playhead — solar-amber attention line
           Positioned(
             left: 90,
             top: 0,
             bottom: 0,
             child: Container(
               width: 2,
-              decoration: const BoxDecoration(
-                color: AppleViolinTheme.appleRed,
+              decoration: BoxDecoration(
+                color: AppleViolinTheme.solarAmber,
                 boxShadow: [
-                  BoxShadow(color: AppleViolinTheme.appleRed, blurRadius: 6, spreadRadius: 1),
+                  BoxShadow(
+                    color: AppleViolinTheme.solarAmber.withValues(alpha: 0.8),
+                    blurRadius: 8,
+                    spreadRadius: 1,
+                  ),
                 ],
               ),
             ),
@@ -829,211 +1553,55 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
   }
 
   Widget _buildPlaybackControls() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+    return Row(
       children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            // Play / Pause + Reset Buttons
-            Row(
-              children: [
-                GestureDetector(
-                  onTap: () {
-                    if (_isPlaying) {
-                      _pausePlayback();
-                    } else {
-                      _startPlayback();
-                    }
-                  },
-                  child: Container(
-                    width: 44,
-                    height: 44,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: AppleViolinTheme.appleBlue,
-                      boxShadow: [
-                        BoxShadow(
-                          color: AppleViolinTheme.appleBlue.withValues(alpha: 0.35),
-                          blurRadius: 8,
-                          offset: const Offset(0, 3),
-                        ),
-                      ],
-                    ),
-                    child: Icon(
-                      _isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                      color: Colors.white,
-                      size: 24,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                GestureDetector(
-                  onTap: _resetPractice,
-                  child: Container(
-                    width: 36,
-                    height: 36,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: AppleViolinTheme.elevatedDark,
-                      border: Border.all(color: Colors.white10),
-                    ),
-                    child: const Icon(Icons.refresh_rounded, color: Colors.white70, size: 18),
-                  ),
-                ),
-              ],
-            ),
-
-            // Demo Playback Button
-            GestureDetector(
-              onTap: () {
-                if (_isDemoPlaying) {
-                  _stopDemo();
-                } else {
-                  _startDemo();
-                }
-              },
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 180),
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
-                decoration: BoxDecoration(
-                  color: _isDemoPlaying
-                      ? AppleViolinTheme.appleGreen.withValues(alpha: 0.25)
-                      : AppleViolinTheme.elevatedDark,
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(
-                    color: _isDemoPlaying ? AppleViolinTheme.appleGreen : Colors.white12,
-                  ),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      _isDemoPlaying ? Icons.stop_rounded : Icons.headphones_rounded,
-                      color: _isDemoPlaying ? AppleViolinTheme.appleGreen : Colors.white,
-                      size: 14,
-                    ),
-                    const SizedBox(width: 5),
-                    Text(
-                      _isDemoPlaying ? 'Стоп демо' : '🎧 Демо',
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w700,
-                        color: _isDemoPlaying ? AppleViolinTheme.appleGreen : Colors.white,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ],
+        _glassIconButton(icon: Icons.refresh_rounded, onTap: _resetPractice),
+        const SizedBox(width: 8),
+        _actionPill(
+          icon: Icons.shutter_speed_rounded,
+          label: 'x',
+          active: _playbackSpeed != 1.0,
+          activeColor: AppleViolinTheme.appleTeal,
+          onTap: _cyclePlaybackSpeed,
         ),
-        const SizedBox(height: 8),
-
-        // Badges: Mode, Accompaniment, Export MIDI
-        Wrap(
-          spacing: 6,
-          runSpacing: 6,
-          children: [
-            // Mode toggle
-            GestureDetector(
-              onTap: () {
-                setState(() {
-                  _practiceMode = _practiceMode == PracticeMode.waitNote
-                      ? PracticeMode.playAlong
-                      : PracticeMode.waitNote;
-                  _resetPractice();
-                });
-              },
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
-                decoration: BoxDecoration(
-                  color: AppleViolinTheme.elevatedDark,
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(color: Colors.white10),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      _practiceMode == PracticeMode.waitNote ? Icons.touch_app_rounded : Icons.speed_rounded,
-                      size: 12,
-                      color: AppleViolinTheme.appleOrange,
-                    ),
-                    const SizedBox(width: 4),
-                    Text(
-                      _practiceMode == PracticeMode.waitNote ? 'Режим: Ждать ноту' : 'Режим: В темпе',
-                      style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Colors.white70),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-
-            // Accompaniment toggle
-            GestureDetector(
-              onTap: () {
-                setState(() {
-                  _isAccompanimentOn = !_isAccompanimentOn;
-                });
-              },
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-                decoration: BoxDecoration(
-                  color: _isAccompanimentOn
-                      ? AppleViolinTheme.appleGreen.withValues(alpha: 0.18)
-                      : AppleViolinTheme.elevatedDark,
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(
-                    color: _isAccompanimentOn ? AppleViolinTheme.appleGreen : Colors.white10,
-                  ),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      Icons.volume_up_rounded,
-                      size: 12,
-                      color: _isAccompanimentOn ? AppleViolinTheme.appleGreen : Colors.white60,
-                    ),
-                    const SizedBox(width: 4),
-                    Text(
-                      _isAccompanimentOn ? 'Ф-но: Вкл' : 'Ф-но: Выкл',
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                        color: _isAccompanimentOn ? AppleViolinTheme.appleGreen : Colors.white60,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-
-            // Export to MIDI file button
-            GestureDetector(
-              onTap: _exportCurrentSongMidi,
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-                decoration: BoxDecoration(
-                  color: AppleViolinTheme.elevatedDark,
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(color: Colors.white10),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: const [
-                    Icon(Icons.save_alt_rounded, color: Colors.white70, size: 12),
-                    SizedBox(width: 3),
-                    Text(
-                      'MIDI',
-                      style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Colors.white70),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ],
+        const SizedBox(width: 8),
+        Expanded(
+          child: _pillButton(
+            icon: _isDemoPlaying
+                ? (_isDemoPaused ? Icons.play_arrow_rounded : Icons.pause_rounded)
+                : Icons.headphones_rounded,
+            label: _isDemoPlaying
+                ? (_isDemoPaused ? 'ПРОДОЛЖИТЬ' : 'ПАУЗА')
+                : 'СЛУШАТЬ',
+            primary: false,
+            active: _isDemoPlaying,
+            onTap: () {
+              if (_isDemoPlaying) {
+                if (_isDemoPaused) {
+                  _resumeDemo();
+                } else {
+                  _pauseDemo();
+                }
+              } else {
+                _startDemo();
+              }
+            },
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: _pillButton(
+            icon: _isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
+            label: _isPlaying ? 'ПАУЗА' : 'ИГРАТЬ',
+            primary: true,
+            onTap: () {
+              if (_isPlaying) {
+                _pausePlayback();
+              } else {
+                _startPlayback();
+              }
+            },
+          ),
         ),
       ],
     );
@@ -1042,9 +1610,10 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
   Widget _buildSongCatalogCard(Song song) {
     final isCurrent = song.id == _currentSong.id;
     final (badgeText, badgeColor) = _getMonogramBadge(song);
+    final accent = isCurrent ? AppleViolinTheme.highVoltageLime : badgeColor;
 
     return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.only(bottom: 10),
       child: GestureDetector(
         onTap: () {
           setState(() {
@@ -1052,32 +1621,34 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
             _resetPractice();
           });
         },
+        behavior: HitTestBehavior.opaque,
         child: AnimatedContainer(
-          duration: const Duration(milliseconds: 180),
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: AppleViolinTheme.cardDark,
-            borderRadius: AppleViolinTheme.cardRadius,
-            border: Border.all(
-              color: isCurrent ? AppleViolinTheme.appleBlue : Colors.white.withValues(alpha: 0.06),
-              width: isCurrent ? 1.6 : 1.0,
-            ),
-            boxShadow: isCurrent ? const [AppleViolinTheme.blueGlow] : null,
+          duration: AppleViolinTheme.motion,
+          curve: AppleViolinTheme.easeOutExpo,
+          padding: const EdgeInsets.all(14),
+          decoration: AppleViolinTheme.glassDecoration(
+            highlighted: isCurrent,
+            radius: AppleViolinTheme.cardRadius,
           ),
           child: Row(
             children: [
               Container(
-                width: 42,
-                height: 42,
+                width: 44,
+                height: 44,
                 decoration: BoxDecoration(
-                  color: badgeColor.withValues(alpha: 0.2),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: badgeColor.withValues(alpha: 0.4)),
+                  color: accent.withValues(alpha: 0.14),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: accent.withValues(alpha: 0.4)),
                 ),
                 child: Center(
                   child: Text(
                     badgeText,
-                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: badgeColor),
+                    style: TextStyle(
+                      fontFamily: AppleViolinTheme.fontMono,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 12,
+                      color: accent,
+                    ),
                   ),
                 ),
               ),
@@ -1088,19 +1659,80 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
                   children: [
                     Text(
                       song.title,
-                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Colors.white),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w700,
+                        fontSize: 14,
+                        letterSpacing: -0.2,
+                        color: AppleViolinTheme.headline,
+                      ),
                     ),
-                    const SizedBox(height: 2),
-                    Text(
-                      '${song.composer} • ${song.notes.length} нот',
-                      style: const TextStyle(fontSize: 11, color: AppleViolinTheme.subtext),
-                    ),
+                    const SizedBox(height: 4),
+                    _microLabel('${song.composer} · ${song.notes.length} НОТ'),
                   ],
                 ),
               ),
-              Text(
-                _formatDuration(song.totalDurationMs),
-                style: const TextStyle(fontSize: 11, fontFamily: 'monospace', color: AppleViolinTheme.subtext),
+              const SizedBox(width: 8),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Text(
+                    _formatDuration(song.totalDurationMs),
+                    style: TextStyle(
+                      fontFamily: AppleViolinTheme.fontMono,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: AppleViolinTheme.subtext,
+                    ),
+                  ),
+                  if (isCurrent) ...[
+                    const SizedBox(height: 4),
+                    _microLabel('АКТИВНА', color: AppleViolinTheme.highVoltageLime),
+                  ],
+                ],
+              ),
+              const SizedBox(width: 10),
+              GestureDetector(
+                onTap: () {
+                  if (isCurrent && _isDemoPlaying) {
+                    if (_isDemoPaused) {
+                      _resumeDemo();
+                    } else {
+                      _pauseDemo();
+                    }
+                  } else {
+                    setState(() {
+                      _currentSong = song;
+                      _resetPractice();
+                    });
+                    _startDemo();
+                  }
+                },
+                child: Container(
+                  width: 36,
+                  height: 36,
+                  decoration: BoxDecoration(
+                    color: (isCurrent && _isDemoPlaying)
+                        ? AppleViolinTheme.highVoltageLime
+                        : const Color(0x0EFFFFFF),
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: (isCurrent && _isDemoPlaying)
+                          ? AppleViolinTheme.highVoltageLime
+                          : AppleViolinTheme.borderSubtle,
+                    ),
+                  ),
+                  child: Icon(
+                    (isCurrent && _isDemoPlaying)
+                        ? (_isDemoPaused ? Icons.play_arrow_rounded : Icons.pause_rounded)
+                        : Icons.headphones_rounded,
+                    size: 16,
+                    color: (isCurrent && _isDemoPlaying)
+                        ? AppleViolinTheme.voidBg
+                        : AppleViolinTheme.headline,
+                  ),
+                ),
               ),
             ],
           ),
@@ -1129,12 +1761,14 @@ class _HighwayPainter extends CustomPainter {
   final int currentNoteIndex;
   final int playbackTimeMs;
   final PracticeMode practiceMode;
+  final bool isDemoPlaying;
 
   _HighwayPainter({
     required this.song,
     required this.currentNoteIndex,
     required this.playbackTimeMs,
     required this.practiceMode,
+    this.isDemoPlaying = false,
   });
 
   @override
@@ -1146,10 +1780,10 @@ class _HighwayPainter extends CustomPainter {
       final n = song.notes[i];
       double noteX;
 
-      if (practiceMode == PracticeMode.waitNote) {
-        noteX = playheadX + (i - currentNoteIndex) * noteSpacing;
-      } else {
+      if (isDemoPlaying || practiceMode == PracticeMode.playAlong) {
         noteX = playheadX + ((n.startTimeMs - playbackTimeMs) / 1000.0) * 110.0;
+      } else {
+        noteX = playheadX + (i - currentNoteIndex) * noteSpacing;
       }
 
       if (noteX < -60 || noteX > size.width + 60) continue;
@@ -1157,23 +1791,23 @@ class _HighwayPainter extends CustomPainter {
       final isCurrent = i == currentNoteIndex;
       Color noteColor;
       if (n.isHit) {
-        noteColor = AppleViolinTheme.appleGreen;
+        noteColor = AppleViolinTheme.hyperEmerald; // clean / hit
       } else if (isCurrent) {
-        noteColor = AppleViolinTheme.appleBlue;
+        noteColor = AppleViolinTheme.highVoltageLime; // target
       } else {
-        noteColor = const Color(0xFF2C2C2E);
+        noteColor = AppleViolinTheme.elevatedHigher; // upcoming
       }
 
       // Draw Slur connection ribbon between slurred pairs
       if (n.isSlurred && n.isSlurStart && i + 1 < song.notes.length) {
         final nextNote = song.notes[i + 1];
         if (nextNote.slurGroupId == n.slurGroupId) {
-          double nextNoteX = practiceMode == PracticeMode.waitNote
-              ? playheadX + ((i + 1) - currentNoteIndex) * noteSpacing
-              : playheadX + ((nextNote.startTimeMs - playbackTimeMs) / 1000.0) * 110.0;
+          double nextNoteX = (isDemoPlaying || practiceMode == PracticeMode.playAlong)
+              ? playheadX + ((nextNote.startTimeMs - playbackTimeMs) / 1000.0) * 110.0
+              : playheadX + ((i + 1) - currentNoteIndex) * noteSpacing;
 
           final ribbonPaint = Paint()
-            ..color = AppleViolinTheme.appleIndigo.withValues(alpha: 0.35)
+            ..color = AppleViolinTheme.electricCobalt.withValues(alpha: 0.32)
             ..style = PaintingStyle.fill;
 
           final path = Path()
@@ -1200,7 +1834,7 @@ class _HighwayPainter extends CustomPainter {
       canvas.drawRRect(pillRect, pillPaint);
 
       final borderPaint = Paint()
-        ..color = isCurrent ? Colors.white : Colors.white24
+        ..color = isCurrent ? AppleViolinTheme.highVoltageLime : Colors.white24
         ..style = PaintingStyle.stroke
         ..strokeWidth = isCurrent ? 2.0 : 1.0;
 
@@ -1212,7 +1846,7 @@ class _HighwayPainter extends CustomPainter {
         style: TextStyle(
           fontSize: isCurrent ? 13 : 11,
           fontWeight: FontWeight.bold,
-          color: Colors.white,
+          color: isCurrent ? AppleViolinTheme.voidBg : AppleViolinTheme.headline,
         ),
       );
       final tp = TextPainter(text: textSpan, textDirection: TextDirection.ltr)..layout();
@@ -1221,7 +1855,10 @@ class _HighwayPainter extends CustomPainter {
       // String subtitle
       final subSpan = TextSpan(
         text: 'Стр. ${n.string.name}',
-        style: const TextStyle(fontSize: 8, color: Colors.white70),
+        style: TextStyle(
+          fontSize: 8,
+          color: isCurrent ? AppleViolinTheme.voidBg.withValues(alpha: 0.72) : AppleViolinTheme.subtext,
+        ),
       );
       final subTp = TextPainter(text: subSpan, textDirection: TextDirection.ltr)..layout();
       subTp.paint(canvas, Offset(noteX - subTp.width / 2, 56));
@@ -1233,5 +1870,65 @@ class _HighwayPainter extends CustomPainter {
     return oldDelegate.currentNoteIndex != currentNoteIndex ||
         oldDelegate.playbackTimeMs != playbackTimeMs ||
         oldDelegate.practiceMode != practiceMode;
+  }
+}
+
+/// A small lime beacon that pulses with the shared easeOutExpo curve.
+class _PulseDot extends StatefulWidget {
+  final Color color;
+
+  const _PulseDot({required this.color});
+
+  @override
+  State<_PulseDot> createState() => _PulseDotState();
+}
+
+class _PulseDotState extends State<_PulseDot> with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+  late final Animation<double> _animation;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1400),
+    )..repeat(reverse: true);
+    _animation = CurvedAnimation(
+      parent: _controller,
+      curve: AppleViolinTheme.easeOutExpo,
+      reverseCurve: AppleViolinTheme.easeOutExpo,
+    );
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _animation,
+      builder: (context, _) {
+        final t = _animation.value;
+        return Container(
+          width: 7,
+          height: 7,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: widget.color,
+            boxShadow: [
+              BoxShadow(
+                color: widget.color.withValues(alpha: 0.65 * (1 - t) + 0.05),
+                blurRadius: 4 + 8 * (1 - t),
+                spreadRadius: 1 + 1.5 * (1 - t),
+              ),
+            ],
+          ),
+        );
+      },
+    );
   }
 }

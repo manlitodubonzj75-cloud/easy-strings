@@ -1,4 +1,5 @@
 #include "audio_processor.h"
+#include "bowed_synth.h"
 
 #include <algorithm>
 #include <array>
@@ -10,10 +11,16 @@
 #include <thread>
 #include <vector>
 
+namespace violin {
+
+struct NoteEvent {
+    float freq_hz{0.0f};
+    float duration_sec{0.0f};
+    bool is_legato{false};
+};
+
 #if defined(__APPLE__)
 #include <AudioToolbox/AudioToolbox.h>
-
-namespace violin {
 
 struct AppleAudioCapture {
     AudioQueueRef queue{nullptr};
@@ -95,53 +102,78 @@ public:
         }
     }
 
-    void play(float freq_hz, float duration_sec) {
+    bool isPlaying() const noexcept {
+        return is_playing_.load(std::memory_order_relaxed);
+    }
+
+    void stop() {
+        pending_stop_.store(true, std::memory_order_release);
+        NoteEvent discard;
+        while (note_queue_.pull(discard)) {}
+        is_playing_.store(false, std::memory_order_release);
+    }
+
+    void play(float freq_hz, float duration_sec, bool is_legato = false) {
         if (freq_hz <= 0.0f || duration_sec <= 0.0f) {
-            duration_left_.store(0.0f, std::memory_order_relaxed);
+            stop();
             return;
         }
-        total_duration_.store(duration_sec, std::memory_order_relaxed);
-        target_freq_.store(freq_hz, std::memory_order_relaxed);
-        duration_left_.store(duration_sec, std::memory_order_release);
+
+        const NoteEvent ev{freq_hz, duration_sec, is_legato};
+        // DRAIN any previous notes so the new note plays IMMEDIATELY without queue delay/backlog!
+        NoteEvent discard;
+        while (note_queue_.pull(discard)) {}
+        note_queue_.push(ev);
+        pending_stop_.store(false, std::memory_order_release);
+        is_playing_.store(true, std::memory_order_release);
+
+        if (queue_) {
+            AudioQueueStart(queue_, nullptr);
+        }
     }
 
     void fillBuffer(AudioQueueBufferRef buffer) {
         float* out = static_cast<float*>(buffer->mAudioData);
         const UInt32 count = buffer->mAudioDataBytesCapacity / sizeof(float);
-        const float freq = target_freq_.load(std::memory_order_relaxed);
-        float left = duration_left_.load(std::memory_order_acquire);
-        const float total_dur = total_duration_.load(std::memory_order_relaxed);
 
-        if (freq <= 0.0f || left <= 0.0f) {
+        if (pending_stop_.load(std::memory_order_acquire)) {
+            synth_.noteOff();
+            is_playing_.store(false, std::memory_order_release);
             std::memset(out, 0, buffer->mAudioDataBytesCapacity);
             buffer->mAudioDataByteSize = buffer->mAudioDataBytesCapacity;
             if (queue_) AudioQueueEnqueueBuffer(queue_, buffer, 0, nullptr);
             return;
         }
 
-        constexpr float kSampleRate = 44100.0f;
-        constexpr float kTwoPi = 6.28318530717958647692f;
-        const float phase_step = kTwoPi * freq / kSampleRate;
-        const float dt = 1.0f / kSampleRate;
-
-        for (UInt32 i = 0; i < count; ++i) {
-            if (left <= 0.0f) {
-                out[i] = 0.0f;
-                continue;
-            }
-            // Smooth attack (15ms ramp) and release (30ms ramp) envelope to eliminate clicks
-            const float elapsed = std::max(0.0f, total_dur - left);
-            const float attack = std::min(1.0f, elapsed * 66.0f);
-            const float release = std::min(1.0f, left * 33.0f);
-            const float env = attack * release * 0.42f;
-
-            out[i] = env * (0.65f * std::sin(phase_) + 0.25f * std::sin(2.0f * phase_) + 0.10f * std::sin(3.0f * phase_));
-            phase_ += phase_step;
-            if (phase_ >= kTwoPi) phase_ -= kTwoPi;
-            left -= dt;
+        if (!is_playing_.load(std::memory_order_acquire)) {
+            std::memset(out, 0, buffer->mAudioDataBytesCapacity);
+            buffer->mAudioDataByteSize = buffer->mAudioDataBytesCapacity;
+            if (queue_) AudioQueueEnqueueBuffer(queue_, buffer, 0, nullptr);
+            return;
         }
 
-        duration_left_.store(std::max(0.0f, left), std::memory_order_release);
+        UInt32 generated = 0;
+        while (generated < count) {
+            NoteEvent next_note;
+            if (note_queue_.pull(next_note)) {
+                // Instantly transition to the newly requested note!
+                const bool use_vibrato = (next_note.duration_sec >= 0.16f);
+                synth_.noteOn(next_note.freq_hz, next_note.duration_sec, use_vibrato, next_note.is_legato);
+                is_playing_.store(true, std::memory_order_release);
+            } else if (!synth_.isActive()) {
+                is_playing_.store(false, std::memory_order_release);
+                std::memset(out + generated, 0, (count - generated) * sizeof(float));
+                break;
+            }
+
+            while (generated < count && synth_.isActive()) {
+                out[generated++] = synth_.tick();
+                if (!note_queue_.empty()) {
+                    break; // Switch to the newly requested note without waiting!
+                }
+            }
+        }
+
         buffer->mAudioDataByteSize = buffer->mAudioDataBytesCapacity;
         if (queue_) AudioQueueEnqueueBuffer(queue_, buffer, 0, nullptr);
     }
@@ -158,21 +190,26 @@ private:
     static constexpr int kNumBuffers = 3;
     static constexpr UInt32 kBufferSampleCount = 1024;
     AudioQueueBufferRef buffers_[kNumBuffers]{};
-    std::atomic<float> target_freq_{0.0f};
-    std::atomic<float> total_duration_{0.0f};
-    std::atomic<float> duration_left_{0.0f};
-    float phase_{0.0f};
+    SpscRingBuffer<NoteEvent, 128> note_queue_;
+    std::atomic<bool> is_playing_{false};
+    std::atomic<bool> pending_stop_{false};
+    BowedViolinModel synth_{44100.0f};
 };
 
-void playAudioTone(float freq_hz, float duration_sec) noexcept {
-    AppleAudioPlayer::instance().play(freq_hz, duration_sec);
+bool isAudioTonePlaying() noexcept {
+    return AppleAudioPlayer::instance().isPlaying();
 }
 
-} // namespace violin
+void playAudioTone(float freq_hz, float duration_sec, bool is_legato) noexcept {
+    AppleAudioPlayer::instance().play(freq_hz, duration_sec, is_legato);
+}
+
+void stopAudioTone() noexcept {
+    AppleAudioPlayer::instance().stop();
+}
+
 #elif defined(__ANDROID__)
 #include <aaudio/AAudio.h>
-
-namespace violin {
 
 struct AndroidAudioCapture {
     AAudioStream* stream{nullptr};
@@ -180,6 +217,8 @@ struct AndroidAudioCapture {
     std::atomic<bool> is_recording{false};
     bool is_float_format{true};
     std::vector<float> conversion_buffer;
+
+    AndroidAudioCapture() : conversion_buffer(4096, 0.0f) {}
 };
 
 static aaudio_data_callback_result_t androidAudioInputCallback(
@@ -202,14 +241,12 @@ static aaudio_data_callback_result_t androidAudioInputCallback(
         capture->tracker->pushSamples(samples, static_cast<std::size_t>(numFrames));
     } else {
         const int16_t* pcm16 = static_cast<const int16_t*>(audioData);
-        if (capture->conversion_buffer.size() < static_cast<std::size_t>(numFrames)) {
-            capture->conversion_buffer.resize(numFrames);
-        }
+        const int32_t frames_to_copy = std::min(numFrames, static_cast<int32_t>(capture->conversion_buffer.size()));
         constexpr float kNorm = 1.0f / 32768.0f;
-        for (int32_t i = 0; i < numFrames; ++i) {
+        for (int32_t i = 0; i < frames_to_copy; ++i) {
             capture->conversion_buffer[i] = static_cast<float>(pcm16[i]) * kNorm;
         }
-        capture->tracker->pushSamples(capture->conversion_buffer.data(), static_cast<std::size_t>(numFrames));
+        capture->tracker->pushSamples(capture->conversion_buffer.data(), static_cast<std::size_t>(frames_to_copy));
     }
 
     return AAUDIO_CALLBACK_RESULT_CONTINUE;
@@ -230,17 +267,33 @@ public:
         closeStream();
     }
 
-    void play(float freq_hz, float duration_sec) {
+    bool isPlaying() const noexcept {
+        return is_playing_.load(std::memory_order_relaxed);
+    }
+
+    void stop() {
+        pending_stop_.store(true, std::memory_order_release);
+        NoteEvent discard;
+        while (note_queue_.pull(discard)) {}
+        is_playing_.store(false, std::memory_order_release);
+    }
+
+    void play(float freq_hz, float duration_sec, bool is_legato = false) {
         if (freq_hz <= 0.0f || duration_sec <= 0.0f) {
-            duration_left_.store(0.0f, std::memory_order_relaxed);
+            stop();
             return;
         }
         if (!stream_) {
             initStream();
         }
-        total_duration_.store(duration_sec, std::memory_order_relaxed);
-        target_freq_.store(freq_hz, std::memory_order_relaxed);
-        duration_left_.store(duration_sec, std::memory_order_release);
+
+        const NoteEvent ev{freq_hz, duration_sec, is_legato};
+        // DRAIN any previous notes so the new note plays IMMEDIATELY without queue delay/backlog!
+        NoteEvent discard;
+        while (note_queue_.pull(discard)) {}
+        note_queue_.push(ev);
+        pending_stop_.store(false, std::memory_order_release);
+        is_playing_.store(true, std::memory_order_release);
 
         if (stream_) {
             aaudio_stream_state_t state = AAudioStream_getState(stream_);
@@ -251,37 +304,39 @@ public:
     }
 
     void fillBuffer(float* out, int32_t numFrames) {
-        const float freq = target_freq_.load(std::memory_order_relaxed);
-        float left = duration_left_.load(std::memory_order_acquire);
-        const float total_dur = total_duration_.load(std::memory_order_relaxed);
-
-        if (freq <= 0.0f || left <= 0.0f) {
+        if (pending_stop_.load(std::memory_order_acquire)) {
+            synth_.noteOff();
+            is_playing_.store(false, std::memory_order_release);
             std::memset(out, 0, numFrames * sizeof(float));
             return;
         }
 
-        constexpr float kSampleRate = 44100.0f;
-        constexpr float kTwoPi = 6.28318530717958647692f;
-        const float phase_step = kTwoPi * freq / kSampleRate;
-        const float dt = 1.0f / kSampleRate;
-
-        for (int32_t i = 0; i < numFrames; ++i) {
-            if (left <= 0.0f) {
-                out[i] = 0.0f;
-                continue;
-            }
-            const float elapsed = std::max(0.0f, total_dur - left);
-            const float attack = std::min(1.0f, elapsed * 66.0f);
-            const float release = std::min(1.0f, left * 33.0f);
-            const float env = attack * release * 0.42f;
-
-            out[i] = env * (0.65f * std::sin(phase_) + 0.25f * std::sin(2.0f * phase_) + 0.10f * std::sin(3.0f * phase_));
-            phase_ += phase_step;
-            if (phase_ >= kTwoPi) phase_ -= kTwoPi;
-            left -= dt;
+        if (!is_playing_.load(std::memory_order_acquire)) {
+            std::memset(out, 0, numFrames * sizeof(float));
+            return;
         }
 
-        duration_left_.store(std::max(0.0f, left), std::memory_order_release);
+        int32_t generated = 0;
+        while (generated < numFrames) {
+            NoteEvent next_note;
+            if (note_queue_.pull(next_note)) {
+                // Instantly switch to the new note!
+                const bool use_vibrato = (next_note.duration_sec >= 0.16f);
+                synth_.noteOn(next_note.freq_hz, next_note.duration_sec, use_vibrato, next_note.is_legato);
+                is_playing_.store(true, std::memory_order_release);
+            } else if (!synth_.isActive()) {
+                is_playing_.store(false, std::memory_order_release);
+                std::memset(out + generated, 0, (numFrames - generated) * sizeof(float));
+                break;
+            }
+
+            while (generated < numFrames && synth_.isActive()) {
+                out[generated++] = synth_.tick();
+                if (!note_queue_.empty()) {
+                    break; // Switch to the newly requested note without waiting!
+                }
+            }
+        }
     }
 
     void fillBufferI16(int16_t* out, int32_t numFrames) {
@@ -353,48 +408,38 @@ private:
     }
 
     AAudioStream* stream_{nullptr};
-    std::atomic<float> target_freq_{0.0f};
-    std::atomic<float> total_duration_{0.0f};
-    std::atomic<float> duration_left_{0.0f};
-    float phase_{0.0f};
+    SpscRingBuffer<NoteEvent, 128> note_queue_;
+    std::atomic<bool> is_playing_{false};
+    std::atomic<bool> pending_stop_{false};
+    BowedViolinModel synth_{44100.0f};
     bool is_float_format_{true};
     std::vector<float> float_buf_;
 };
 
-void playAudioTone(float freq_hz, float duration_sec) noexcept {
-    AndroidAudioPlayer::instance().play(freq_hz, duration_sec);
+bool isAudioTonePlaying() noexcept {
+    return AndroidAudioPlayer::instance().isPlaying();
 }
 
-} // namespace violin
+void playAudioTone(float freq_hz, float duration_sec, bool is_legato) noexcept {
+    AndroidAudioPlayer::instance().play(freq_hz, duration_sec, is_legato);
+}
+
+void stopAudioTone() noexcept {
+    AndroidAudioPlayer::instance().stop();
+}
+
 #else
 
-namespace violin {
+void playAudioTone(float /*freq_hz*/, float /*duration_sec*/, bool /*is_legato*/) noexcept {}
+bool isAudioTonePlaying() noexcept { return false; }
+void stopAudioTone() noexcept {}
 
-void playAudioTone(float /*freq_hz*/, float /*duration_sec*/) noexcept {}
-
-} // namespace violin
 #endif
-
-namespace violin {
 
 namespace {
 
 constexpr float kPi = 3.14159265358979323846f;
 constexpr float kTwoPi = 2.0f * kPi;
-
-// Violin range: G3 (~196 Hz) to E7 (~2637 Hz).
-// Setting min to 160.0f filters out AC hum (50/60/100/120 Hz) and room rumbles.
-constexpr float kMinPitchHz = 160.0f;
-constexpr float kMaxPitchHz = 2200.0f;
-
-constexpr float kMPMThreshold = 0.50f;
-
-constexpr float kScratchFlatnessThreshold = 0.28f;
-constexpr float kScratchHnrThresholdDb = 6.0f;
-
-constexpr std::size_t kFFTSize = kFrameSize;
-
-using Complex = std::complex<float>;
 
 static void applyHannWindow(
     const std::array<float, kFrameSize>& input,
@@ -437,70 +482,53 @@ static void fft(
 
         for (std::size_t i = 0; i < kFFTSize; i += len) {
             Complex w(1.0f, 0.0f);
-            const std::size_t half = len >> 1;
-
-            for (std::size_t j = 0; j < half; ++j) {
+            for (std::size_t j = 0; j < len / 2; ++j) {
                 const Complex u = data[i + j];
-                const Complex v = data[i + j + half] * w;
-
+                const Complex v = data[i + j + len / 2] * w;
                 data[i + j] = u + v;
-                data[i + j + half] = u - v;
-
+                data[i + j + len / 2] = u - v;
                 w *= wlen;
             }
         }
     }
 }
 
-static float magnitudeSquared(const Complex& value) noexcept
+inline float magnitudeSquared(const Complex& c) noexcept
 {
-    return value.real() * value.real() + value.imag() * value.imag();
+    return c.real() * c.real() + c.imag() * c.imag();
 }
 
-static float hzToBin(float hz, float sample_rate) noexcept
+inline float hzToBin(float hz, std::size_t sample_rate) noexcept
 {
-    return hz * static_cast<float>(kFFTSize) / sample_rate;
+    return hz * static_cast<float>(kFFTSize) / static_cast<float>(sample_rate);
 }
 
-} // anonymous namespace
+} // namespace
 
-ViolinTracker::ViolinTracker(float sample_rate)
+ViolinTracker::ViolinTracker(std::size_t sample_rate)
     : sample_rate_(sample_rate)
 {
 }
 
 ViolinTracker::~ViolinTracker()
 {
-    stopMic();
     stop();
 }
 
-bool ViolinTracker::start() noexcept
+void ViolinTracker::start()
 {
-    bool expected = false;
-
-    if (!running_.compare_exchange_strong(
-            expected,
-            true,
-            std::memory_order_acq_rel)) {
-        return false;
+    if (running_.exchange(true, std::memory_order_acq_rel)) {
+        return;
     }
 
-    worker_thread_ = std::thread(
-        &ViolinTracker::workerLoop,
-        this);
-
-    return true;
+    worker_thread_ = std::thread(&ViolinTracker::workerLoop, this);
 }
 
-void ViolinTracker::stop() noexcept
+void ViolinTracker::stop()
 {
-    bool expected = true;
+    stopMic();
 
-    if (!running_.compare_exchange_strong(
-            expected,
-            false,
-            std::memory_order_acq_rel)) {
+    if (!running_.exchange(false, std::memory_order_acq_rel)) {
         return;
     }
 
@@ -509,20 +537,24 @@ void ViolinTracker::stop() noexcept
     }
 }
 
-bool ViolinTracker::startMic() noexcept
+bool ViolinTracker::isRunning() const noexcept
 {
-    if (mic_active_.load(std::memory_order_acquire)) {
+    return running_.load(std::memory_order_relaxed);
+}
+
+bool ViolinTracker::startMic()
+{
+    if (mic_active_.load(std::memory_order_relaxed)) {
         return true;
     }
+
 #if defined(__APPLE__)
-    auto* capture = new (std::nothrow) AppleAudioCapture();
-    if (!capture) {
-        return false;
-    }
+    auto* capture = new AppleAudioCapture();
     capture->tracker = this;
+    capture->is_recording.store(true, std::memory_order_release);
 
     AudioStreamBasicDescription format{};
-    format.mSampleRate = sample_rate_;
+    format.mSampleRate = static_cast<Float64>(sample_rate_);
     format.mFormatID = kAudioFormatLinearPCM;
     format.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
     format.mBytesPerPacket = sizeof(float);
@@ -531,7 +563,7 @@ bool ViolinTracker::startMic() noexcept
     format.mChannelsPerFrame = 1;
     format.mBitsPerChannel = 32;
 
-    OSStatus status = AudioQueueNewInput(
+    OSStatus st = AudioQueueNewInput(
         &format,
         appleAudioQueueCallback,
         capture,
@@ -540,22 +572,21 @@ bool ViolinTracker::startMic() noexcept
         0,
         &capture->queue);
 
-    if (status != noErr) {
+    if (st != noErr || !capture->queue) {
         delete capture;
         return false;
     }
 
-    capture->is_recording.store(true, std::memory_order_release);
-    const UInt32 bufferByteSize = AppleAudioCapture::kBufferSampleCount * sizeof(float);
+    const UInt32 bufSize = AppleAudioCapture::kBufferSampleCount * sizeof(float);
     for (int i = 0; i < AppleAudioCapture::kNumBuffers; ++i) {
-        status = AudioQueueAllocateBuffer(capture->queue, bufferByteSize, &capture->buffers[i]);
-        if (status == noErr) {
+        st = AudioQueueAllocateBuffer(capture->queue, bufSize, &capture->buffers[i]);
+        if (st == noErr && capture->buffers[i]) {
             AudioQueueEnqueueBuffer(capture->queue, capture->buffers[i], 0, nullptr);
         }
     }
 
-    status = AudioQueueStart(capture->queue, nullptr);
-    if (status != noErr) {
+    st = AudioQueueStart(capture->queue, nullptr);
+    if (st != noErr) {
         AudioQueueDispose(capture->queue, true);
         delete capture;
         return false;
@@ -564,12 +595,11 @@ bool ViolinTracker::startMic() noexcept
     platform_mic_handle_ = capture;
     mic_active_.store(true, std::memory_order_release);
     return true;
+
 #elif defined(__ANDROID__)
-    auto* capture = new (std::nothrow) AndroidAudioCapture();
-    if (!capture) {
-        return false;
-    }
+    auto* capture = new AndroidAudioCapture();
     capture->tracker = this;
+    capture->is_recording.store(true, std::memory_order_release);
 
     AAudioStreamBuilder* builder = nullptr;
     aaudio_result_t result = AAudio_createStreamBuilder(&builder);
@@ -590,13 +620,13 @@ bool ViolinTracker::startMic() noexcept
     if (result != AAUDIO_OK || !capture->stream) {
         AAudioStreamBuilder_setFormat(builder, AAUDIO_FORMAT_PCM_I16);
         result = AAudioStreamBuilder_openStream(builder, &capture->stream);
-        if (result != AAUDIO_OK || !capture->stream) {
-            AAudioStreamBuilder_delete(builder);
-            delete capture;
-            return false;
-        }
     }
     AAudioStreamBuilder_delete(builder);
+
+    if (result != AAUDIO_OK || !capture->stream) {
+        delete capture;
+        return false;
+    }
 
     aaudio_format_t fmt = AAudioStream_getFormat(capture->stream);
     capture->is_float_format = (fmt == AAUDIO_FORMAT_PCM_FLOAT);
@@ -608,26 +638,29 @@ bool ViolinTracker::startMic() noexcept
         return false;
     }
 
-    capture->is_recording.store(true, std::memory_order_release);
     platform_mic_handle_ = capture;
     mic_active_.store(true, std::memory_order_release);
     return true;
+
 #else
     return false;
 #endif
 }
 
-void ViolinTracker::stopMic() noexcept
+void ViolinTracker::stopMic()
 {
     if (!mic_active_.exchange(false, std::memory_order_acq_rel)) {
         return;
     }
+
 #if defined(__APPLE__)
     if (platform_mic_handle_) {
         auto* capture = static_cast<AppleAudioCapture*>(platform_mic_handle_);
         capture->is_recording.store(false, std::memory_order_release);
-        AudioQueueStop(capture->queue, true);
-        AudioQueueDispose(capture->queue, true);
+        if (capture->queue) {
+            AudioQueueStop(capture->queue, true);
+            AudioQueueDispose(capture->queue, true);
+        }
         delete capture;
         platform_mic_handle_ = nullptr;
     }
@@ -718,7 +751,8 @@ void ViolinTracker::workerLoop() noexcept
 
 float ViolinTracker::calculateMPM(
     const std::array<float, kFrameSize>& frame,
-    float& confidence) const noexcept
+    float& confidence,
+    const std::array<Complex, kFFTSize>& spectrum) const noexcept
 {
     confidence = 0.0f;
 
@@ -766,13 +800,13 @@ float ViolinTracker::calculateMPM(
     std::vector<MpmPeak> peaks;
     float max_peak_nsdf = 0.0f;
 
-    // Find all local maxima over threshold
+    // Find all local maxima over low threshold to avoid dropping weak fundamentals
     for (std::size_t lag = min_lag + 1; lag + 1 <= max_lag; ++lag) {
         const float prev = nsdf[lag - 1];
         const float current = nsdf[lag];
         const float next = nsdf[lag + 1];
 
-        if (current < kMPMThreshold) {
+        if (current < 0.22f) {
             continue;
         }
 
@@ -804,66 +838,78 @@ float ViolinTracker::calculateMPM(
         }
     }
 
-    if (peaks.empty() || max_peak_nsdf < kMPMThreshold) {
+    if (peaks.empty() || max_peak_nsdf < 0.35f) {
         return 0.0f;
     }
 
-    // Standard McLeod Pitch Method (MPM) octave-error prevention:
-    // Any multiple of the fundamental period (lag = 2*T0, 3*T0) will also create an NSDF peak,
-    // often with slightly higher correlation than T0 (causing octave-lower error).
-    // Therefore, MPM picks the FIRST local maximum peak that exceeds (0.80 * max_peak_nsdf).
-    constexpr float kCutoffCoeff = 0.80f;
+    // Standard McLeod Pitch Method (MPM):
+    // Pick the first peak exceeding (0.72 * max_peak_nsdf).
+    constexpr float kCutoffCoeff = 0.72f;
     const float cutoff = max_peak_nsdf * kCutoffCoeff;
 
-    float best_pitch = 0.0f;
-    float best_nsdf = 0.0f;
-    float best_lag = 0.0f;
-
+    MpmPeak chosen = peaks.front();
     for (const auto& p : peaks) {
         if (p.nsdf >= cutoff) {
-            best_pitch = p.pitch;
-            best_nsdf = p.nsdf;
-            best_lag = p.lag;
+            chosen = p;
             break;
         }
     }
 
-    if (best_pitch <= 0.0f) {
-        best_pitch = peaks.front().pitch;
-        best_nsdf = peaks.front().nsdf;
-        best_lag = peaks.front().lag;
-    }
+    // Helper lambda to measure spectral power around a target frequency
+    auto getSpectralPower = [&](float freq_hz) -> float {
+        if (freq_hz <= 0.0f || freq_hz >= sample_rate_ * 0.5f) return 0.0f;
+        const float center = hzToBin(freq_hz, sample_rate_);
+        const int center_bin = static_cast<int>(std::lround(center));
+        float peak_power = 0.0f;
+        for (int offset = -2; offset <= 2; ++offset) {
+            const int b = center_bin + offset;
+            if (b >= 1 && b < static_cast<int>(kFFTSize / 2)) {
+                peak_power = std::max(peak_power, magnitudeSquared(spectrum[static_cast<std::size_t>(b)]));
+            }
+        }
+        return peak_power;
+    };
 
-    // Octave-up error prevention (e.g. smartphone mic rolling off fundamental below 300Hz,
-    // causing 2nd harmonic at half-period T0/2 to look like the primary peak):
-    // If a significant subharmonic peak exists at ~2 * best_lag, verify if it's the fundamental.
-    for (const auto& p : peaks) {
-        if (p.lag > best_lag * 1.85f && p.lag < best_lag * 2.15f) {
-            if (p.nsdf >= 0.65f * best_nsdf && p.nsdf >= kMPMThreshold) {
-                best_pitch = p.pitch;
-                best_nsdf = p.nsdf;
-                break;
+    const float chosen_power = getSpectralPower(chosen.pitch);
+
+    // Violin Octave-Up and Overtone Elimination:
+    // Only apply when the candidate pitch might be an overtone of the lowest open strings (G3 ~196Hz, D4 ~293Hz).
+    // For higher pitches, do NOT erroneously force downward into violin body resonances (280Hz / 470Hz).
+    for (int harmonic_ratio = 2; harmonic_ratio <= 3; ++harmonic_ratio) {
+        const float target_sub_lag = chosen.lag * static_cast<float>(harmonic_ratio);
+        const float sub_freq = sample_rate_ / target_sub_lag;
+        if (sub_freq < kMinPitchHz || sub_freq > 330.0f) {
+            continue;
+        }
+
+        // Search for a candidate peak in the vicinity of target_sub_lag
+        for (const auto& p : peaks) {
+            const float ratio = p.lag / chosen.lag;
+            const float diff = std::fabs(ratio - static_cast<float>(harmonic_ratio));
+            if (diff <= 0.10f) { // Within 10% of exact subharmonic ratio
+                const float sub_power = getSpectralPower(p.pitch);
+                const float odd3_power = (harmonic_ratio == 2) ? getSpectralPower(p.pitch * 3.0f) : 0.0f;
+
+                // Subharmonic is the true fundamental ONLY if there is actual acoustic/spectral energy
+                // at the odd harmonic frequencies (f_sub or 3*f_sub).
+                const bool has_odd_energy = (chosen_power > 0.0f) &&
+                    ((sub_power >= 0.08f * chosen_power) || (odd3_power >= 0.08f * chosen_power));
+
+                if (p.nsdf >= 0.60f * chosen.nsdf && has_odd_energy) {
+                    chosen = p;
+                    break;
+                }
             }
         }
     }
 
-    confidence = std::clamp(max_peak_nsdf, 0.0f, 1.0f);
-    return best_pitch;
+    confidence = std::clamp(chosen.nsdf, 0.0f, 1.0f);
+    return chosen.pitch;
 }
 
 float ViolinTracker::calculateSpectralFlatness(
-    const std::array<float, kFrameSize>& frame) const noexcept
+    const std::array<Complex, kFFTSize>& spectrum) const noexcept
 {
-    std::array<float, kFrameSize> windowed{};
-    applyHannWindow(frame, windowed);
-
-    std::array<Complex, kFFTSize> spectrum{};
-    for (std::size_t i = 0; i < kFFTSize; ++i) {
-        spectrum[i] = Complex(windowed[i], 0.0f);
-    }
-
-    fft(spectrum);
-
     double log_sum = 0.0;
     double arithmetic_sum = 0.0;
 
@@ -887,22 +933,12 @@ float ViolinTracker::calculateSpectralFlatness(
 }
 
 float ViolinTracker::calculateHarmonicsToNoise(
-    const std::array<float, kFrameSize>& frame,
+    const std::array<Complex, kFFTSize>& spectrum,
     float fundamental_hz) const noexcept
 {
     if (fundamental_hz <= 0.0f) {
         return -100.0f;
     }
-
-    std::array<float, kFrameSize> windowed{};
-    applyHannWindow(frame, windowed);
-
-    std::array<Complex, kFFTSize> spectrum{};
-    for (std::size_t i = 0; i < kFFTSize; ++i) {
-        spectrum[i] = Complex(windowed[i], 0.0f);
-    }
-
-    fft(spectrum);
 
     constexpr std::size_t half = kFFTSize / 2;
     double total_power = 0.0;
@@ -1004,17 +1040,27 @@ PitchResult ViolinTracker::processFrame(
     result.rms_energy = 0;
     result.reserved = 0;
 
-    // 1. Calculate frame RMS energy
-    double sum_sq = 0.0;
+    // 1. Remove DC offset (clean microphone bias)
+    std::array<float, kFrameSize> clean_frame{};
+    float sum = 0.0f;
     for (float s : frame) {
+        sum += s;
+    }
+    const float dc_offset = sum / static_cast<float>(kFrameSize);
+    for (std::size_t i = 0; i < kFrameSize; ++i) {
+        clean_frame[i] = frame[i] - dc_offset;
+    }
+
+    // 2. Calculate frame RMS energy on clean signal
+    double sum_sq = 0.0;
+    for (float s : clean_frame) {
         sum_sq += static_cast<double>(s) * static_cast<double>(s);
     }
-    const float rms = static_cast<float>(std::sqrt(sum_sq / static_cast<double>(frame.size())));
+    const float rms = static_cast<float>(std::sqrt(sum_sq / static_cast<double>(kFrameSize)));
     result.rms_energy = static_cast<std::uint8_t>(std::clamp(rms * 1000.0f, 0.0f, 255.0f));
 
-    // Zero out immediately on silence or ambient noise floor (< 3.0 mV)
-    // This strictly eliminates phantom sounds.
-    if (rms < 0.0015f) {
+    // Zero out immediately on silence or ambient noise floor (< 1.2 mV)
+    if (rms < 0.0012f) {
         last_stable_pitch_ = 0.0f;
         min_rms_transition_ = 0.0f;
         result.frequency_hz = 0.0f;
@@ -1023,23 +1069,34 @@ PitchResult ViolinTracker::processFrame(
         return result;
     }
 
+    // 3. Compute single FFT for spectral analysis and harmonic validation
+    std::array<float, kFrameSize> windowed{};
+    applyHannWindow(clean_frame, windowed);
+
+    std::array<Complex, kFFTSize> spectrum{};
+    for (std::size_t i = 0; i < kFFTSize; ++i) {
+        spectrum[i] = Complex(windowed[i], 0.0f);
+    }
+    fft(spectrum);
+
+    // 4. Calculate MPM with spectral subharmonic validation
     float confidence = 0.0f;
-    const float pitch = calculateMPM(frame, confidence);
+    const float pitch = calculateMPM(clean_frame, confidence, spectrum);
 
     // If pitch cannot be reliably determined: return zeroed result
-    if (pitch <= 0.0f || confidence < 0.40f) {
+    if (pitch <= 0.0f || confidence < 0.35f) {
         last_stable_pitch_ = 0.0f;
         min_rms_transition_ = 0.0f;
         result.frequency_hz = 0.0f;
         result.confidence = 0.0f;
-        result.is_scratching = (rms > 0.015f) ? 1 : 0;
+        result.is_scratching = 0;
         return result;
     }
 
     result.frequency_hz = pitch;
     result.confidence = confidence;
 
-    // 2. Legato (Slur) Transition Detection:
+    // 5. Legato (Slur) Transition Detection:
     // Continuous tone without bow reversal/silence dip
     const int current_midi = static_cast<int>(std::lround(69.0 + 12.0 * std::log2(static_cast<double>(pitch) / 440.0)));
 
@@ -1048,7 +1105,7 @@ PitchResult ViolinTracker::processFrame(
 
         if (current_midi != prev_midi) {
             // Note pitch shifted! Check if energy was continuous
-            if (min_rms_transition_ > 0.005f && rms > 0.005f) {
+            if (min_rms_transition_ > 0.004f && rms > 0.004f) {
                 // Legato transition: continuous bow stroke across distinct pitches
                 result.is_legato = 1;
             } else {
@@ -1072,15 +1129,15 @@ PitchResult ViolinTracker::processFrame(
 
     updatePitchHistory(pitch);
 
-    const float spectral_flatness = calculateSpectralFlatness(frame);
-    const float hnr_db = calculateHarmonicsToNoise(frame, pitch);
+    const float spectral_flatness = calculateSpectralFlatness(spectrum);
+    const float hnr_db = calculateHarmonicsToNoise(spectrum, pitch);
 
     const bool high_noise_floor = spectral_flatness > 0.45f;
     const bool weak_harmonic_structure = hnr_db < 3.0f;
 
     // True scratch only when acoustic energy is loud (rms > 0.025f)
-    // with degraded harmonic periodicity (confidence < 0.65f)
-    result.is_scratching = (rms > 0.025f && confidence < 0.65f && high_noise_floor && weak_harmonic_structure) ? 1 : 0;
+    // with degraded harmonic periodicity (confidence < 0.55f)
+    result.is_scratching = (rms > 0.025f && confidence < 0.55f && high_noise_floor && weak_harmonic_structure) ? 1 : 0;
 
     return result;
 }

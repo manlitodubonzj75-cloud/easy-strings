@@ -1,0 +1,92 @@
+{
+  "task_name": "microservices_architecture_refactor",
+  "language": "python",
+  "ports": {
+    "gateway_service": 8000,
+    "music_service": 8001,
+    "tuner_service": 8002,
+    "omr_service": 8003
+  },
+  "env_vars": {
+    "GATEWAY_PORT": {
+      "default": "8000",
+      "description": "Port for the API Gateway microservice"
+    },
+    "MUSIC_SERVICE_PORT": {
+      "default": "8001",
+      "description": "Port for the Music Theory & Fingering microservice"
+    },
+    "TUNER_SERVICE_PORT": {
+      "default": "8002",
+      "description": "Port for the Tuner & Audio DSP microservice"
+    },
+    "OMR_SERVICE_PORT": {
+      "default": "8003",
+      "description": "Port for the Optical Music Recognition microservice"
+    },
+    "SERVICES_HOST": {
+      "default": "127.0.0.1",
+      "description": "Default bind host for internal microservices"
+    }
+  },
+  "contracts": [
+    {
+      "file_path": "services/contracts.py",
+      "code": "from dataclasses import dataclass, asdict\nfrom typing import List, Dict, Any\n\n@dataclass\nclass HealthResponse:\n    service_name: str\n    status: str\n    version: str = \"1.0.0\"\n    uptime_seconds: float = 0.0\n\n    def to_dict(self) -> Dict[str, Any]:\n        return asdict(self)\n\n    @classmethod\n    def from_dict(cls, data: Dict[str, Any]) -> \"HealthResponse\":\n        return cls(**data)\n\n@dataclass\nclass ScaleRequest:\n    root_note: str\n    scale_type: str = \"major\"\n\n    def to_dict(self) -> Dict[str, Any]:\n        return asdict(self)\n\n    @classmethod\n    def from_dict(cls, data: Dict[str, Any]) -> \"ScaleRequest\":\n        return cls(**data)\n\n@dataclass\nclass ScaleResponse:\n    root_note: str\n    scale_type: str\n    notes: List[str]\n    frequencies: List[float]\n\n    def to_dict(self) -> Dict[str, Any]:\n        return asdict(self)\n\n    @classmethod\n    def from_dict(cls, data: Dict[str, Any]) -> \"ScaleResponse\":\n        return cls(**data)\n\n@dataclass\nclass FingeringRequest:\n    note: str\n\n    def to_dict(self) -> Dict[str, Any]:\n        return asdict(self)\n\n    @classmethod\n    def from_dict(cls, data: Dict[str, Any]) -> \"FingeringRequest\":\n        return cls(**data)\n\n@dataclass\nclass FingeringResponse:\n    note: str\n    string_name: str\n    finger_number: int\n    position: str\n\n    def to_dict(self) -> Dict[str, Any]:\n        return asdict(self)\n\n    @classmethod\n    def from_dict(cls, data: Dict[str, Any]) -> \"FingeringResponse\":\n        return cls(**data)\n\n@dataclass\nclass PitchDetectionRequest:\n    samples: List[float]\n    sample_rate: int = 44100\n\n    def to_dict(self) -> Dict[str, Any]:\n        return asdict(self)\n\n    @classmethod\n    def from_dict(cls, data: Dict[str, Any]) -> \"PitchDetectionRequest\":\n        return cls(**data)\n\n@dataclass\nclass PitchDetectionResponse:\n    frequency_hz: float\n    note_name: str\n    octave: int\n    cents_off: float\n    in_tune: bool\n    target_frequency_hz: float\n\n    def to_dict(self) -> Dict[str, Any]:\n        return asdict(self)\n\n    @classmethod\n    def from_dict(cls, data: Dict[str, Any]) -> \"PitchDetectionResponse\":\n        return cls(**data)\n\n@dataclass\nclass OmrParseRequest:\n    image_base64: str\n    detect_slurs: bool = True\n\n    def to_dict(self) -> Dict[str, Any]:\n        return asdict(self)\n\n    @classmethod\n    def from_dict(cls, data: Dict[str, Any]) -> \"OmrParseRequest\":\n        return cls(**data)\n\n@dataclass\nclass OmrParseResponse:\n    notes: List[Dict[str, Any]]\n    time_signature: str\n    key_signature: str\n    confidence: float\n\n    def to_dict(self) -> Dict[str, Any]:\n        return asdict(self)\n\n    @classmethod\n    def from_dict(cls, data: Dict[str, Any]) -> \"OmrParseResponse\":\n        return cls(**data)\n\n@dataclass\nclass GatewayAggregatedHealth:\n    gateway_status: str\n    services: Dict[str, Dict[str, Any]]\n\n    def to_dict(self) -> Dict[str, Any]:\n        return asdict(self)\n\n    @classmethod\n    def from_dict(cls, data: Dict[str, Any]) -> \"GatewayAggregatedHealth\":\n        return cls(**data)\n"
+    }
+  ],
+  "acceptance_tests": [
+    {
+      "file_path": "tests/test_acceptance_swarm.py",
+      "test_framework": "unittest",
+      "code": "import unittest\nimport math\nfrom services.contracts import (\n    HealthResponse,\n    ScaleRequest,\n    ScaleResponse,\n    FingeringRequest,\n    FingeringResponse,\n    PitchDetectionRequest,\n    PitchDetectionResponse,\n    OmrParseRequest,\n    OmrParseResponse,\n    GatewayAggregatedHealth\n)\nfrom services.music_service.service import MusicTheoryService\nfrom services.tuner_service.service import TunerService\nfrom services.omr_service.service import OmrService\nfrom services.gateway_service.gateway import ApiGateway\n\nclass TestMicroservicesAcceptance(unittest.TestCase):\n\n    def test_contracts_serialization(self):\n        scale_req = ScaleRequest(root_note=\"A\", scale_type=\"minor\")\n        self.assertEqual(scale_req.to_dict(), {\"root_note\": \"A\", \"scale_type\": \"minor\"})\n        recovered = ScaleRequest.from_dict(scale_req.to_dict())\n        self.assertEqual(recovered.root_note, \"A\")\n        self.assertEqual(recovered.scale_type, \"minor\")\n\n    def test_music_service_scales(self):\n        service = MusicTheoryService()\n        resp = service.get_scale(ScaleRequest(root_note=\"C\", scale_type=\"major\"))\n        self.assertEqual(resp.notes, [\"C\", \"D\", \"E\", \"F\", \"G\", \"A\", \"B\", \"C\"])\n        self.assertEqual(len(resp.frequencies), 8)\n        self.assertAlmostEqual(resp.frequencies[0], 261.63, delta=0.5)\n\n    def test_music_service_fingering(self):\n        service = MusicTheoryService()\n        open_a = service.get_fingering(FingeringRequest(note=\"A4\"))\n        self.assertEqual(open_a.string_name, \"A\")\n        self.assertEqual(open_a.finger_number, 0)\n\n        first_finger_b = service.get_fingering(FingeringRequest(note=\"B4\"))\n        self.assertEqual(first_finger_b.string_name, \"A\")\n        self.assertEqual(first_finger_b.finger_number, 1)\n\n        open_d = service.get_fingering(FingeringRequest(note=\"D4\"))\n        self.assertEqual(open_d.string_name, \"D\")\n        self.assertEqual(open_d.finger_number, 0)\n\n    def test_tuner_pitch_detection_sine_wave(self):\n        service = TunerService()\n        sample_rate = 44100\n        freq = 440.0\n        duration_sec = 0.05\n        sample_count = int(sample_rate * duration_sec)\n        samples = [\n            math.sin(2.0 * math.pi * freq * i / sample_rate)\n            for i in range(sample_count)\n        ]\n\n        resp = service.detect_pitch(PitchDetectionRequest(samples=samples, sample_rate=sample_rate))\n        self.assertAlmostEqual(resp.frequency_hz, 440.0, delta=2.0)\n        self.assertEqual(resp.note_name, \"A\")\n        self.assertEqual(resp.octave, 4)\n        self.assertTrue(resp.in_tune)\n        self.assertLess(abs(resp.cents_off), 5.0)\n\n    def test_omr_service_parsing(self):\n        service = OmrService()\n        req = OmrParseRequest(image_base64=\"mock_sheet_base64_payload\", detect_slurs=True)\n        resp = service.parse_score(req)\n        self.assertIsInstance(resp.notes, list)\n        self.assertGreater(len(resp.notes), 0)\n        self.assertEqual(resp.time_signature, \"4/4\")\n        self.assertGreater(resp.confidence, 0.5)\n\n    def test_gateway_routing_and_aggregated_health(self):\n        music_svc = MusicTheoryService()\n        tuner_svc = TunerService()\n        omr_svc = OmrService()\n        gateway = ApiGateway(music_service=music_svc, tuner_service=tuner_svc, omr_service=omr_svc)\n\n        status_code, health = gateway.handle_request(\"/api/v1/health\", \"GET\", None)\n        self.assertEqual(status_code, 200)\n        self.assertEqual(health[\"gateway_status\"], \"healthy\")\n        self.assertIn(\"music_service\", health[\"services\"])\n        self.assertIn(\"tuner_service\", health[\"services\"])\n        self.assertIn(\"omr_service\", health[\"services\"])\n\n        music_code, music_res = gateway.handle_request(\"/api/v1/music/scale\", \"POST\", {\"root_note\": \"D\", \"scale_type\": \"major\"})\n        self.assertEqual(music_code, 200)\n        self.assertEqual(music_res[\"notes\"][0], \"D\")\n\n        tuner_code, tuner_res = gateway.handle_request(\"/api/v1/tuner/detect\", \"POST\", {\"samples\": [0.0] * 512, \"sample_rate\": 44100})\n        self.assertEqual(tuner_code, 200)\n\n        err_code, err_res = gateway.handle_request(\"/api/v1/unknown\", \"GET\", None)\n        self.assertEqual(err_code, 404)\n\nif __name__ == \"__main__\":\n    unittest.main()\n"
+    }
+  ],
+  "dag": [
+    {
+      "task_id": "worker_task_1",
+      "assigned_worker": "free-worker-1",
+      "target_files": [
+        "services/music_service/service.py"
+      ],
+      "dependencies": [],
+      "description": "Implement MusicTheoryService handling violin scales, note frequencies, and first-position fingerings adhering to ScaleRequest, ScaleResponse, FingeringRequest, FingeringResponse in services/contracts.py.",
+      "is_integration_phase": false
+    },
+    {
+      "task_id": "worker_task_2",
+      "assigned_worker": "free-worker-2",
+      "target_files": [
+        "services/tuner_service/service.py"
+      ],
+      "dependencies": [],
+      "description": "Implement TunerService providing pitch detection via autocorrelation, closest musical note mapping, cents deviation computation, and in-tune thresholding adhering to PitchDetectionRequest and PitchDetectionResponse in services/contracts.py.",
+      "is_integration_phase": false
+    },
+    {
+      "task_id": "worker_task_3",
+      "assigned_worker": "free-worker-3",
+      "target_files": [
+        "services/omr_service/service.py"
+      ],
+      "dependencies": [],
+      "description": "Implement OmrService providing score parsing, slur detection, and measure structuring adhering to OmrParseRequest and OmrParseResponse in services/contracts.py.",
+      "is_integration_phase": false
+    },
+    {
+      "task_id": "worker_task_4",
+      "assigned_worker": "paid-worker-1",
+      "target_files": [
+        "services/gateway_service/gateway.py",
+        "main.py"
+      ],
+      "dependencies": [
+        "worker_task_1",
+        "worker_task_2",
+        "worker_task_3"
+      ],
+      "description": "Implement ApiGateway routing microservice endpoints (/api/v1/music/*, /api/v1/tuner/*, /api/v1/omr/*, /api/v1/health), aggregating health status across microservices, and refactor main.py entrypoint to boot services and gateway cleanly.",
+      "is_integration_phase": true
+    }
+  ]
+}

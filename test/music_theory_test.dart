@@ -33,4 +33,30 @@ void main() {
     expect(flat, isNotNull);
     expect(flat!.cents, lessThan(-15.0));
   });
+
+  test('analyzePitch folds acoustic 2nd and 3rd harmonics to fundamental when targetString is selected', () {
+    // String G3 (standard open: 196.0 Hz).
+    // Violin body strongly radiates 2nd harmonic (392.0 Hz) and 3rd harmonic (588.0 Hz).
+    final harmonic2 = MusicTheory.analyzePitch(392.0, 0.9, false, targetString: ViolinString.g);
+    expect(harmonic2, isNotNull);
+    expect(harmonic2!.noteName, 'G3');
+    expect(harmonic2.rawHz, closeTo(196.0, 0.5));
+    expect(harmonic2.cents.abs(), lessThan(1.0));
+    expect(harmonic2.isInTune, isTrue);
+    expect(harmonic2.pegAction, PegAction.inTune);
+
+    final harmonic3 = MusicTheory.analyzePitch(588.0, 0.9, false, targetString: ViolinString.g);
+    expect(harmonic3, isNotNull);
+    expect(harmonic3!.noteName, 'G3');
+    expect(harmonic3.rawHz, closeTo(196.0, 0.5));
+    expect(harmonic3.cents.abs(), lessThan(1.0));
+    expect(harmonic3.isInTune, isTrue);
+
+    // String D4 (standard open: 293.66 Hz). 2nd harmonic is 587.33 Hz.
+    final dHarmonic2 = MusicTheory.analyzePitch(587.33, 0.9, false, targetString: ViolinString.d);
+    expect(dHarmonic2, isNotNull);
+    expect(dHarmonic2!.noteName, 'D4');
+    expect(dHarmonic2.rawHz, closeTo(293.66, 0.5));
+    expect(dHarmonic2.isInTune, isTrue);
+  });
 }

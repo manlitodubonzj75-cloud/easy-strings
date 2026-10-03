@@ -30,5 +30,9 @@
 	<string>NSApplication</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Easy Violin needs access to your microphone to track your violin playing in real-time.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Easy Violin needs access to your camera to scan sheet music scores and transcribe notes.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Easy Violin needs access to your photo library to import sheet music images.</string>
 </dict>
 </plist>

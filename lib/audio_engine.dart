@@ -93,6 +93,12 @@ typedef _PlayToneDart = void Function(
   double durationSec,
 );
 
+typedef _StopToneNative = Void Function();
+typedef _StopToneDart = void Function();
+
+typedef _IsTonePlayingNative = Int32 Function();
+typedef _IsTonePlayingDart = int Function();
+
 /// -------------------------------------------------------------------------
 /// Dart-level result
 /// -------------------------------------------------------------------------
@@ -180,6 +186,18 @@ class AudioEngine {
   _PushSamplesDart? _pushSamples;
   _PushSynthNoteDart? _pushSynthNote;
   _PlayToneDart? _playTone;
+  _StopToneDart? _stopTone;
+  _IsTonePlayingDart? _isTonePlayingNative;
+  bool _isTonePlayingDart = false;
+  Timer? _tonePlayingTimer;
+
+  bool get isTonePlaying {
+    final nativeCheck = _isTonePlayingNative;
+    if (nativeCheck != null && nativeCheck() != 0) {
+      return true;
+    }
+    return _isTonePlayingDart;
+  }
 
   StreamController<PitchResult>? _controller;
   Stream<PitchResult>? _results;
@@ -283,6 +301,12 @@ class AudioEngine {
   }
 
   void playTone(double frequencyHz, [double durationSec = 1.0]) {
+    _isTonePlayingDart = true;
+    _tonePlayingTimer?.cancel();
+    _tonePlayingTimer = Timer(Duration(milliseconds: (durationSec * 1000).toInt() + 100), () {
+      _isTonePlayingDart = false;
+    });
+
     final fn = _playTone;
     if (fn != null) {
       fn(frequencyHz, durationSec);
@@ -291,9 +315,18 @@ class AudioEngine {
     }
   }
 
+  /// Immediately silences any active acoustic tone or synthesizer output.
+  void stopTone() {
+    _tonePlayingTimer?.cancel();
+    _isTonePlayingDart = false;
+    final fn = _stopTone;
+    if (fn != null) {
+      fn();
+    }
+  }
+
   void playSyntheticNote(double frequencyHz, [double durationSec = 1.0]) {
     playTone(frequencyHz, durationSec);
-    pushSynthNote(frequencyHz, durationSec);
   }
 
   int pushSamples(
@@ -318,6 +351,7 @@ class AudioEngine {
     final commandPort = _workerCommandPort;
     if (commandPort == null) return;
 
+    stopTone();
     stopMic();
 
     final responsePort = ReceivePort();
@@ -337,6 +371,7 @@ class AudioEngine {
     _pushSamples = null;
     _pushSynthNote = null;
     _playTone = null;
+    _stopTone = null;
 
     _resultReceivePort?.close();
     _resultReceivePort = null;
@@ -370,6 +405,12 @@ class AudioEngine {
     );
     try {
       _playTone = library.lookupFunction<_PlayToneNative, _PlayToneDart>('violin_play_tone');
+    } catch (_) {}
+    try {
+      _stopTone = library.lookupFunction<_StopToneNative, _StopToneDart>('violin_stop_tone');
+    } catch (_) {}
+    try {
+      _isTonePlayingNative = library.lookupFunction<_IsTonePlayingNative, _IsTonePlayingDart>('violin_is_tone_playing');
     } catch (_) {}
   }
 

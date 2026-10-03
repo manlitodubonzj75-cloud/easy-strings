@@ -1,3 +1,4 @@
+import 'dart:isolate';
 import 'dart:math' as math;
 import 'dart:typed_data';
 import 'package:image/image.dart' as img;
@@ -50,12 +51,14 @@ class _DetectedNotehead {
   final double y;
   final double radius;
   final bool isFilled;
+  final int darkCount;
 
   const _DetectedNotehead({
     required this.x,
     required this.y,
     required this.radius,
     required this.isFilled,
+    this.darkCount = 0,
   });
 }
 
@@ -75,9 +78,28 @@ class SheetMusicOmrParser {
     String title = 'Распознанная партитура',
     int defaultTempoBpm = 100,
   }) async {
-    final decoded = img.decodeImage(imageBytes);
+    return Isolate.run(() {
+      return _parseImageBytesSync(
+        imageBytes,
+        title: title,
+        defaultTempoBpm: defaultTempoBpm,
+      );
+    });
+  }
+
+  static OmrResult _parseImageBytesSync(
+    Uint8List imageBytes, {
+    String title = 'Распознанная партитура',
+    int defaultTempoBpm = 100,
+  }) {
+    var decoded = img.decodeImage(imageBytes);
     if (decoded == null) {
       throw const FormatException('Не удалось декодировать изображение партитуры');
+    }
+
+    if (decoded.width > 1600) {
+      final targetHeight = (decoded.height * 1600 / decoded.width).round();
+      decoded = img.copyResize(decoded, width: 1600, height: targetHeight);
     }
 
     final width = decoded.width;
@@ -93,19 +115,37 @@ class SheetMusicOmrParser {
     // 2. Multi-strip Staff Detection (Handles skewed/tilted camera photos)
     final staves = _detectStaffSystems(binary, width, height);
 
-    // 3. Detect Noteheads on each staff system
+    // 3. Detect Noteheads, Bar Lines (Measures), and Slur Arcs on each staff system
     final allNotes = <SongNote>[];
     int noteIdCounter = 0;
     int currentGlobalTimeMs = 0;
+    int totalMeasures = 1;
 
     for (final staff in staves) {
       final noteheads = _detectNoteheads(binary, width, height, staff);
       // Sort noteheads left to right (chronological music order)
       noteheads.sort((a, b) => a.x.compareTo(b.x));
 
-      for (final nh in noteheads) {
+      final detectedBars = _detectBarLines(binary, width, height, staff);
+      totalMeasures += detectedBars;
+
+      final slurPairs = _detectSlurArcs(binary, width, height, noteheads, staff);
+      final slurMap = <int, (bool, bool, int)>{};
+      int slurGroupIdCounter = 1;
+      for (final pair in slurPairs) {
+        final gId = slurGroupIdCounter++;
+        slurMap[pair.$1] = (true, false, gId);
+        slurMap[pair.$2] = (false, true, gId);
+      }
+
+      for (int nhIdx = 0; nhIdx < noteheads.length; nhIdx++) {
+        final nh = noteheads[nhIdx];
         // Map vertical position Y to Treble Clef MIDI pitch
-        final midiPitch = _yToTrebleMidi(nh.x, nh.y, staff);
+        final baseMidiPitch = _yToTrebleMidi(nh.x, nh.y, staff);
+
+        // Detect Accidental (# or b) immediately to the left of the notehead
+        final accidentalShift = _detectAccidental(binary, width, height, nh.x, nh.y, staff);
+        final midiPitch = baseMidiPitch + accidentalShift;
 
         // Determine duration based on filled (quarter/eighth) vs hollow (half/whole) head
         final durationMs = nh.isFilled
@@ -115,6 +155,11 @@ class SheetMusicOmrParser {
         final (string, finger) = findViolinFingering(midiPitch);
         final noteName = MusicTheory.midiToNoteName(midiPitch);
 
+        final slurInfo = slurMap[nhIdx];
+        final isSlurStart = slurInfo?.$1 ?? false;
+        final isSlurEnd = slurInfo?.$2 ?? false;
+        final slurGroupId = slurInfo?.$3;
+
         allNotes.add(SongNote(
           midiNote: midiPitch,
           startTimeMs: currentGlobalTimeMs,
@@ -123,6 +168,9 @@ class SheetMusicOmrParser {
           string: string,
           finger: finger,
           bowDirection: (noteIdCounter % 2 == 0) ? BowDirection.down : BowDirection.up,
+          isSlurStart: isSlurStart,
+          isSlurEnd: isSlurEnd,
+          slurGroupId: slurGroupId,
         ));
 
         currentGlobalTimeMs += durationMs;
@@ -144,8 +192,8 @@ class SheetMusicOmrParser {
     );
 
     final confidence = math.min(0.95, 0.65 + (allNotes.length * 0.02));
-    final report = 'Успешно распознано: ${allNotes.length} нот, '
-        '${staves.length} нотных станов. Высота тона и аппликатура рассчитаны.';
+    final report = "Успешно распознано: ${allNotes.length} нот, "
+        "${staves.length} нотных станов ($totalMeasures тактов). Высота тона и аппликатура рассчитаны.";
 
     return OmrResult(
       song: song,
@@ -367,78 +415,143 @@ class SheetMusicOmrParser {
     final endX = (width * 0.96).toInt();
     final step = math.max(1, (spacing * 0.25).round());
 
+    final rx = (spacing * 0.60).round();
+    final ry = (spacing * 0.42).round();
+
     for (int x = startX; x < endX; x += step) {
       for (int y = searchMarginTop; y < searchMarginBottom; y += step) {
-        if (!binary[y][x]) continue;
+        // Measure elliptic window around (x, y)
+        int darkCount = 0;
+        int totalCount = 0;
+        double sumX = 0.0;
+        double sumY = 0.0;
+        int centerDark = 0;
 
-        // Check horizontal thickness at (x, y)
-        int hThick = 1;
-        int left = x - 1;
-        while (left >= 0 && binary[y][left] && (x - left) < spacing * 2.0) {
-          hThick++;
-          left--;
-        }
-        int right = x + 1;
-        while (right < width && binary[y][right] && (right - x) < spacing * 2.0) {
-          hThick++;
-          right++;
-        }
-
-        // Check vertical thickness at (x, y)
-        int vThick = 1;
-        int up = y - 1;
-        while (up >= 0 && binary[up][x] && (y - up) < spacing * 2.0) {
-          vThick++;
-          up--;
-        }
-        int down = y + 1;
-        while (down < height && binary[down][x] && (down - y) < spacing * 2.0) {
-          vThick++;
-          down++;
-        }
-
-        // Notehead has both horizontal AND vertical thickness >= 0.45 * spacing
-        // (Thin staff lines fail vertical thickness, vertical stems fail horizontal thickness)
-        final isThickBlob = hThick >= (spacing * 0.45) && vThick >= (spacing * 0.45);
-
-        if (isThickBlob) {
-          // Circular density check
-          int darkCount = 0;
-          int totalCount = 0;
-          final r = expectedRadius.round();
-
-          for (int dy = -r; dy <= r; dy++) {
-            final py = y + dy;
-            if (py < 0 || py >= height) continue;
-            for (int dx = -r; dx <= r; dx++) {
-              final px = x + dx;
-              if (px < 0 || px >= width) continue;
-              if (dx * dx + dy * dy <= r * r) {
-                totalCount++;
-                if (binary[py][px]) darkCount++;
-              }
+                for (int dy = -ry; dy <= ry; dy++) {
+          final py = y + dy;
+          if (py < 0 || py >= height) continue;
+          for (int dx = -rx; dx <= rx; dx++) {
+            final px = x + dx;
+            if (px < 0 || px >= width) continue;
+            final distNorm = (dx * dx) / (rx * rx * 1.0) + (dy * dy) / (ry * ry * 1.0);
+            if (distNorm <= 1.0) {
+              totalCount++;
+              if (binary[py][px]) {
+                darkCount++;
+                sumX += px;
+                sumY += py;
+                if (dx.abs() <= 2 && dy.abs() <= 2) {
+                  centerDark++;
+                }
+                                                                              }
             }
           }
+        }
 
-          final fillRatio = totalCount > 0 ? (darkCount / totalCount) : 0.0;
+        final fillRatio = totalCount > 0 ? (darkCount / totalCount) : 0.0;
 
-          // Notehead candidate (filled >= 0.48 or hollow ring with thick edges)
-          if (fillRatio >= 0.46) {
-            bool alreadyCovered = false;
-            for (final existing in noteheads) {
-              final distSq = (existing.x - x) * (existing.x - x) + (existing.y - y) * (existing.y - y);
-              if (distSq < spacing * spacing * 0.7) {
-                alreadyCovered = true;
+        // An authentic 2D notehead ellipse must span across off-axis quadrants (rejecting 1D crosses)
+        // Notehead ellipse has robust area (> 40 dark pixels) and solid presence
+        final isNoteheadOval = fillRatio >= 0.45 && darkCount >= 42;
+        final isFilledHead = isNoteheadOval && centerDark >= 3;
+        final isHollowHead = isNoteheadOval && !isFilledHead;
+
+        if (isFilledHead || isHollowHead) {
+          // Reject thin horizontal staff line running through
+
+          // If dark pixels are solely a thin line with hRun large and low vertical extent, skip
+          int vRun = 0;
+          for (int oy = -ry; oy <= ry; oy++) {
+            final cy = y + oy;
+            if (cy >= 0 && cy < height && binary[cy][x]) vRun++;
+          }
+
+          if (vRun >= 3) {
+            double curX = darkCount > 0 ? (sumX / darkCount) : x.toDouble();
+            double curY = darkCount > 0 ? (sumY / darkCount) : y.toDouble();
+
+            // 1 Mean-Shift refinement step to center precisely on true notehead oval (avoiding ledger line pull)
+            double msSumX = 0.0, msSumY = 0.0;
+            int msCount = 0;
+            final roundX = curX.round();
+            final roundY = curY.round();
+            for (int dy = -ry; dy <= ry; dy++) {
+              final py = roundY + dy;
+              if (py < 0 || py >= height) continue;
+              for (int dx = -rx; dx <= rx; dx++) {
+                final px = roundX + dx;
+                if (px < 0 || px >= width) continue;
+                if ((dx * dx) / (rx * rx * 1.0) + (dy * dy) / (ry * ry * 1.0) <= 1.0 && binary[py][px]) {
+                  msSumX += px;
+                  msSumY += py;
+                  msCount++;
+                }
+              }
+            }
+            if (msCount > 0) {
+              curX = msSumX / msCount;
+              curY = msSumY / msCount;
+            }
+
+            // Refine vertical center to the row with peak oval width (immune to thin horizontal ledger lines)
+            int bestY = curY.round();
+            int maxOvalWidth = 0;
+            for (int oy = -3; oy <= 3; oy++) {
+              final testY = curY.round() + oy;
+              if (testY < 0 || testY >= height) continue;
+              int w = 0;
+              for (int ox = -rx; ox <= rx; ox++) {
+                final testX = curX.round() + ox;
+                if (testX >= 0 && testX < width && binary[testY][testX]) {
+                  // Only count pixels belonging to a vertically thick body (notehead oval, not 1-2px ledger line)
+                  int vRun = 1;
+                  int uy = testY - 1;
+                  while (uy >= 0 && binary[uy][testX]) { vRun++; uy--; }
+                  int dy = testY + 1;
+                  while (dy < height && binary[dy][testX]) { vRun++; dy++; }
+                  if (vRun >= 3) w++;
+                }
+              }
+              // Only count if this row is part of a vertically thick oval (>= 4 px)
+              int vt = 0;
+              for (int vy = -2; vy <= 2; vy++) {
+                final py = testY + vy;
+                if (py >= 0 && py < height && binary[py][curX.round()]) vt++;
+              }
+              if (vt >= 4 && w > maxOvalWidth) {
+                maxOvalWidth = w;
+                bestY = testY;
+              }
+            }
+            curY = bestY.toDouble();
+
+            bool merged = false;
+            for (int k = 0; k < noteheads.length; k++) {
+              final existing = noteheads[k];
+              final distSq = (existing.x - curX) * (existing.x - curX) +
+                  (existing.y - curY) * (existing.y - curY);
+              if (distSq < spacing * spacing * 0.70) {
+                if (darkCount > existing.darkCount) {
+                  noteheads[k] = _DetectedNotehead(
+                    x: curX,
+                    y: curY,
+                    radius: expectedRadius,
+                    isFilled: isFilledHead,
+                    darkCount: darkCount,
+                  );
+                }
+                merged = true;
                 break;
               }
             }
 
-            if (!alreadyCovered) {
+            if (!merged) {
               noteheads.add(_DetectedNotehead(
-                x: x.toDouble(),
-                y: y.toDouble(),
+                x: curX,
+                y: curY,
                 radius: expectedRadius,
-                isFilled: fillRatio > 0.62,
+                isFilled: isFilledHead,
+                darkCount: darkCount,
               ));
             }
           }
@@ -455,32 +568,33 @@ class SheetMusicOmrParser {
     final halfStep = staff.lineSpacing * 0.5;
 
     // Distance above bottom line in half-steps
-    final stepsAboveBottom = ((bottomLineY - noteY) / halfStep).round();
+    final exactStep = (bottomLineY - noteY) / halfStep;
+    final stepsAboveBottom = exactStep.round();
 
     // Map step indices to diatonic MIDI notes
     const stepToMidi = {
-      -4: 55, // G3 (lowest open string)
-      -3: 57, // A3
-      -2: 59, // B3
-      -1: 60, // C4 (Middle C)
-      0: 62,  // D4 (Open string)
-      1: 64,  // E4 (Bottom line 1)
-      2: 65,  // F4
-      3: 67,  // G4 (Line 2)
-      4: 69,  // A4 (Open string / Tuning standard)
-      5: 71,  // B4 (Line 3)
-      6: 72,  // C5
-      7: 74,  // D5 (Line 4)
-      8: 76,  // E5 (Open string)
-      9: 77,  // F5 (Line 5)
-      10: 79, // G5
-      11: 81, // A5
-      12: 83, // B5
-      13: 84, // C6
-      14: 86, // D6
+      -5: 55, // G3 (lowest open string, space below 2nd ledger)
+      -4: 57, // A3 (2nd ledger line below)
+      -3: 59, // B3 (space below 1st ledger)
+      -2: 60, // C4 (Middle C, 1st ledger line below)
+      -1: 62, // D4 (space below bottom line)
+      0: 64,  // E4 (Bottom line 1)
+      1: 65,  // F4 (Space 1)
+      2: 67,  // G4 (Line 2)
+      3: 69,  // A4 (Space 2 - Tuning standard)
+      4: 71,  // B4 (Line 3)
+      5: 72,  // C5 (Space 3)
+      6: 74,  // D5 (Line 4)
+      7: 76,  // E5 (Space 4)
+      8: 77,  // F5 (Line 5 - Top line)
+      9: 79,  // G5 (Space above line 5)
+      10: 81, // A5 (1st ledger line above)
+      11: 83, // B5
+      12: 84, // C6
+      13: 86, // D6
     };
 
-    final clampedStep = stepsAboveBottom.clamp(-4, 14);
+    final clampedStep = stepsAboveBottom.clamp(-5, 14);
     return stepToMidi[clampedStep] ?? 69;
   }
 
@@ -538,6 +652,209 @@ class SheetMusicOmrParser {
     }
     return notes;
   }
+
+
+  /// Detects accidental glyph (sharp # or flat b) placed immediately to the left of notehead
+  static int _detectAccidental(
+    List<List<bool>> binary,
+    int width,
+    int height,
+    double noteX,
+    double noteY,
+    _StaffSystem staff,
+  ) {
+    final startX = (noteX - 23).round().clamp(0, width - 1);
+    final endX = (noteX - 8).round().clamp(0, width - 1);
+    final startY = (noteY - 7).round().clamp(0, height - 1);
+    final endY = (noteY + 7).round().clamp(0, height - 1);
+
+    if (endX <= startX || endY <= startY) return 0;
+
+    int nonStaffDarkPixels = 0;
+
+    for (int x = startX; x <= endX; x++) {
+      // Reject full-height bar lines or long stems (continuous vertical run > 25px)
+      int vCont = 0;
+      for (int y = math.max(0, (noteY - 16).round()); y <= math.min(height - 1, (noteY + 16).round()); y++) {
+        if (binary[y][x]) vCont++;
+      }
+      if (vCont >= 24) continue; // Skip continuous long vertical bar line
+
+      for (int y = startY; y <= endY; y++) {
+        if (!binary[y][x]) continue;
+
+        // Ignore staff lines
+        bool onStaffLine = false;
+        for (final sy in staff.linesY) {
+          if ((y - sy).abs() <= 2) {
+            onStaffLine = true;
+            break;
+          }
+        }
+        if (onStaffLine) continue;
+
+        // Ignore horizontal ledger lines (pixels with wide horizontal run and vertical thickness <= 2)
+        int hRun = 1;
+        int lx = x - 1;
+        while (lx >= 0 && binary[y][lx]) { hRun++; lx--; }
+        int rx = x + 1;
+        while (rx < width && binary[y][rx]) { hRun++; rx++; }
+
+        int vRun = 1;
+        int uy = y - 1;
+        while (uy >= 0 && binary[uy][x]) { vRun++; uy--; }
+        int dy = y + 1;
+        while (dy < height && binary[dy][x]) { vRun++; dy++; }
+
+        if (hRun >= 8 && vRun <= 2) continue; // Pure horizontal line (ledger line)
+
+        nonStaffDarkPixels++;
+      }
+    }
+
+
+
+    // Accidental requires substantial localized non-staff ink
+    if (nonStaffDarkPixels < 15) return 0; // No accidental (natural)
+
+    // Above notehead center (y in [noteY - 8 .. noteY - 4]), check for 2 distinct parallel vertical stems (sharp #)
+    // vs 1 single tall stem (flat b)
+    final topY1 = (noteY - 8).round().clamp(0, height - 1);
+    final topY2 = (noteY - 4).round().clamp(0, height - 1);
+    final stemColumns = <int>[];
+
+    for (int x = startX; x <= endX; x++) {
+      int count = 0;
+      for (int y = topY1; y <= topY2; y++) {
+        if (binary[y][x]) count++;
+      }
+      if (count >= 3) {
+        stemColumns.add(x);
+      }
+    }
+
+    // Check if there are 2 separate vertical stems separated by >= 3 pixels
+    bool hasTwoDistinctStems = false;
+    for (int i = 0; i < stemColumns.length; i++) {
+      for (int j = i + 1; j < stemColumns.length; j++) {
+        if ((stemColumns[j] - stemColumns[i]).abs() >= 3) {
+          hasTwoDistinctStems = true;
+          break;
+        }
+      }
+      if (hasTwoDistinctStems) break;
+    }
+
+    if (hasTwoDistinctStems) {
+      return 1; // Sharp (#) -> 2 distinct parallel vertical lines
+    } else if (stemColumns.isNotEmpty) {
+      return -1; // Flat (b) -> 1 single vertical stem
+    }
+
+    return 0; // Natural
+  }
+
+  /// Detects vertical bar lines spanning across the staff lines
+  static int _detectBarLines(
+    List<List<bool>> binary,
+    int width,
+    int height,
+    _StaffSystem staff,
+  ) {
+    int barLines = 0;
+    final topY = staff.topLineY.round().clamp(0, height - 1);
+    final bottomY = staff.bottomLineY.round().clamp(0, height - 1);
+    final staffH = bottomY - topY;
+    if (staffH <= 0) return 0;
+
+    final startX = (width * 0.12).toInt();
+    final endX = (width * 0.88).toInt();
+
+    for (int x = startX; x < endX; x++) {
+      int span = 0;
+      for (int y = topY; y <= bottomY; y++) {
+        if (binary[y][x]) span++;
+      }
+      if (span >= staffH * 0.88) {
+        barLines++;
+        x += 10; // skip bar line thickness
+      }
+    }
+    return barLines;
+  }
+
+  /// Detects curved slur / ligature arcs spanning between adjacent notes
+  static List<(int, int)> _detectSlurArcs(
+    List<List<bool>> binary,
+    int width,
+    int height,
+    List<_DetectedNotehead> noteheads,
+    _StaffSystem staff,
+  ) {
+    final slurredPairs = <(int, int)>[];
+    if (noteheads.length < 2) return slurredPairs;
+
+    final spacing = staff.lineSpacing;
+
+    for (int i = 0; i < noteheads.length - 1; i++) {
+      final nh1 = noteheads[i];
+      final nh2 = noteheads[i + 1];
+
+      final xStart = (nh1.x + 8).round().clamp(0, width - 1);
+      final xEnd = (nh2.x - 8).round().clamp(0, width - 1);
+      if (xEnd <= xStart + 12) continue;
+
+      // Scan the region above the stems linking nh1 and nh2
+      final minY = (math.min(nh1.y, nh2.y) - spacing * 4.8).round().clamp(0, height - 1);
+      final maxY = (math.min(nh1.y, nh2.y) - spacing * 1.1).round().clamp(0, height - 1);
+      if (maxY <= minY) continue;
+
+      int arcColumnsFound = 0;
+      final totalColumns = xEnd - xStart;
+      int minArcY = 9999;
+      int maxArcY = -9999;
+
+      final staffLines = staff.linesY;
+      for (int x = xStart; x <= xEnd; x++) {
+        for (int y = minY; y <= maxY; y++) {
+          // Ignore horizontal staff lines
+          bool onStaffLine = false;
+          for (final sy in staffLines) {
+            if ((y - sy).abs() <= 2) {
+              onStaffLine = true;
+              break;
+            }
+          }
+          if (onStaffLine) continue;
+
+          if (binary[y][x]) {
+            int vThick = 1;
+            int down = y + 1;
+            while (down <= maxY && binary[down][x]) {
+              vThick++;
+              down++;
+            }
+            // Thin arc pixel (1-4px) situated between or above staff lines
+            if (vThick >= 1 && vThick <= 4) {
+              arcColumnsFound++;
+              if (y < minArcY) minArcY = y;
+              if (y > maxArcY) maxArcY = y;
+              break;
+            }
+          }
+        }
+      }
+
+      // An authentic slur arc must be horizontally continuous and have curved vertical sag/arch
+      final curvature = (maxArcY - minArcY);
+      if ((arcColumnsFound / totalColumns >= 0.42) && curvature >= 4) {
+        slurredPairs.add((i, i + 1));
+      }
+    }
+
+    return slurredPairs;
+  }
+
 }
 
 class _StaffCandidate {
@@ -545,3 +862,4 @@ class _StaffCandidate {
   final double lineSpacing;
   const _StaffCandidate({required this.linesY, required this.lineSpacing});
 }
+

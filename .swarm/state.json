@@ -1,26 +1,55 @@
 {
   "version": "1.0.0",
-  "last_updated": 1790738955.375055,
-  "modules": {
-    "main": {
-      "path": "main.py",
-      "exports": [],
-      "dependencies": [],
-      "role": "service",
-      "worker_id": "free-worker-1",
-      "updated_at": 1790738955.375052
+  "last_updated": 1790741540.599227,
+  "modules": {},
+  "routes": {},
+  "ports": {
+    "gateway_service": {
+      "port": 8000,
+      "allocated_at": 1790741540.594115
+    },
+    "music_service": {
+      "port": 8001,
+      "allocated_at": 1790741540.5953228
+    },
+    "tuner_service": {
+      "port": 8002,
+      "allocated_at": 1790741540.595884
+    },
+    "omr_service": {
+      "port": 8003,
+      "allocated_at": 1790741540.596378
     }
   },
-  "routes": {},
-  "ports": {},
-  "env_vars": {},
+  "env_vars": {
+    "GATEWAY_PORT": {
+      "default": "Port for the API Gateway microservice",
+      "description": "8000"
+    },
+    "MUSIC_SERVICE_PORT": {
+      "default": "Port for the Music Theory & Fingering microservice",
+      "description": "8001"
+    },
+    "TUNER_SERVICE_PORT": {
+      "default": "Port for the Tuner & Audio DSP microservice",
+      "description": "8002"
+    },
+    "OMR_SERVICE_PORT": {
+      "default": "Port for the Optical Music Recognition microservice",
+      "description": "8003"
+    },
+    "SERVICES_HOST": {
+      "default": "Default bind host for internal microservices",
+      "description": "127.0.0.1"
+    }
+  },
   "contracts": [],
   "metrics": {
-    "total_tasks": 3,
-    "total_spent_rub": 0.0,
-    "total_prompt_tokens": 522,
-    "total_completion_tokens": 2999,
-    "free_tier_tasks": 3
+    "total_tasks": 6,
+    "total_spent_rub": 9.98,
+    "total_prompt_tokens": 16658,
+    "total_completion_tokens": 27706,
+    "free_tier_tasks": 4
   },
   "history": [
     {
@@ -46,6 +75,30 @@
       "tokens": 1110,
       "is_free": true,
       "status": "success"
+    },
+    {
+      "task_id": "task_1790738902_2519b2",
+      "timestamp": 1790738955.522937,
+      "spent_rub": 0.0,
+      "tokens": 7226,
+      "is_free": true,
+      "status": "success"
+    },
+    {
+      "task_id": "task_1790740073_2da8e1",
+      "timestamp": 1790740153.107818,
+      "spent_rub": 3.27,
+      "tokens": 5396,
+      "is_free": false,
+      "status": "failed"
+    },
+    {
+      "task_id": "task_1790740704_9404e5",
+      "timestamp": 1790740796.9957728,
+      "spent_rub": 6.710000000000001,
+      "tokens": 28221,
+      "is_free": false,
+      "status": "failed"
     }
   ]
 }

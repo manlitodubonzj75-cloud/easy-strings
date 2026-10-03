@@ -160,6 +160,10 @@ public:
         return pulled;
     }
 
+    bool empty() const noexcept {
+        return available() == 0;
+    }
+
     std::size_t available() const noexcept {
         const std::size_t write =
             write_index_.load(std::memory_order_acquire);
