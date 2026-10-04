@@ -334,7 +334,35 @@ public:
         pending_stop_.store(true, std::memory_order_release);
         NoteEvent discard;
         while (note_queue_.pull(discard)) {}
+        {
+            std::lock_guard<std::mutex> lock(pcm_mutex_);
+            pcm_stream_.clear();
+            pcm_read_pos_ = 0;
+        }
         is_playing_.store(false, std::memory_order_release);
+    }
+
+    void playPcm(const float* samples, std::size_t count) {
+        if (!samples || count == 0) {
+            stop();
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(pcm_mutex_);
+            pcm_stream_.assign(samples, samples + count);
+            pcm_read_pos_ = 0;
+        }
+        pending_stop_.store(false, std::memory_order_release);
+        is_playing_.store(true, std::memory_order_release);
+
+        if (!stream_) {
+            initStream();
+        } else {
+            aaudio_stream_state_t state = AAudioStream_getState(stream_);
+            if (state == AAUDIO_STREAM_STATE_PAUSED || state == AAUDIO_STREAM_STATE_STOPPED) {
+                AAudioStream_requestStart(stream_);
+            }
+        }
     }
 
     void play(float freq_hz, float duration_sec, bool is_legato = false) {
@@ -372,6 +400,23 @@ public:
 
         if (!is_playing_.load(std::memory_order_acquire)) {
             std::memset(out, 0, numFrames * sizeof(float));
+            return;
+        }
+
+        if (!pcm_stream_.empty()) {
+            std::lock_guard<std::mutex> lock(pcm_mutex_);
+            for (int32_t i = 0; i < numFrames; ++i) {
+                if (pcm_read_pos_ < pcm_stream_.size()) {
+                    out[i] = pcm_stream_[pcm_read_pos_++];
+                } else {
+                    out[i] = 0.0f;
+                }
+            }
+            if (pcm_read_pos_ >= pcm_stream_.size()) {
+                pcm_stream_.clear();
+                pcm_read_pos_ = 0;
+                is_playing_.store(false, std::memory_order_release);
+            }
             return;
         }
 
@@ -473,6 +518,9 @@ private:
     BowedViolinModel synth_{44100.0f};
     bool is_float_format_{true};
     std::vector<float> float_buf_;
+    std::mutex pcm_mutex_;
+    std::vector<float> pcm_stream_;
+    std::size_t pcm_read_pos_{0};
 };
 
 bool isAudioTonePlaying() noexcept {
@@ -487,11 +535,16 @@ void stopAudioTone() noexcept {
     AndroidAudioPlayer::instance().stop();
 }
 
+void playAudioPcmBuffer(const float* samples, std::size_t count) noexcept {
+    AndroidAudioPlayer::instance().playPcm(samples, count);
+}
+
 #else
 
 void playAudioTone(float /*freq_hz*/, float /*duration_sec*/, bool /*is_legato*/) noexcept {}
 bool isAudioTonePlaying() noexcept { return false; }
 void stopAudioTone() noexcept {}
+void playAudioPcmBuffer(const float* /*samples*/, std::size_t /*count*/) noexcept {}
 
 #endif
 
@@ -740,6 +793,11 @@ void ViolinTracker::stopMic()
 bool ViolinTracker::isMicActive() const noexcept
 {
     return mic_active_.load(std::memory_order_relaxed);
+}
+
+float ViolinTracker::getStablePitch() const noexcept
+{
+    return last_stable_pitch_;
 }
 
 std::size_t ViolinTracker::pushSamples(
