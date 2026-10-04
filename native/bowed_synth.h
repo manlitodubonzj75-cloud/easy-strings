@@ -98,6 +98,27 @@ public:
         reset();
     }
 
+    void setLowpass(float sample_rate, float cutoff_hz, float q = 0.7071f) {
+        const float w0 = 2.0f * 3.141592653589793f * (cutoff_hz / sample_rate);
+        const float cos_w0 = std::cos(w0);
+        const float sin_w0 = std::sin(w0);
+        const float alpha = sin_w0 / (2.0f * q);
+
+        const float b0_unnorm = (1.0f - cos_w0) / 2.0f;
+        const float b1_unnorm = 1.0f - cos_w0;
+        const float b2_unnorm = (1.0f - cos_w0) / 2.0f;
+        const float a0_unnorm = 1.0f + alpha;
+        const float a1_unnorm = -2.0f * cos_w0;
+        const float a2_unnorm = 1.0f - alpha;
+
+        b0_ = b0_unnorm / a0_unnorm;
+        b1_ = b1_unnorm / a0_unnorm;
+        b2_ = b2_unnorm / a0_unnorm;
+        a1_ = a1_unnorm / a0_unnorm;
+        a2_ = a2_unnorm / a0_unnorm;
+        reset();
+    }
+
     float process(float in) {
         const float out = b0_ * in + b1_ * x1_ + b2_ * x2_ - a1_ * y1_ - a2_ * y2_;
         x2_ = x1_;
@@ -126,8 +147,8 @@ private:
  * 3. Exact phase-delay compensation for reflection damping filters (<2 cent intonation accuracy)
  * 4. Fast adaptive envelope scaling (short notes 30-100ms are never eaten or muffled)
  * 5. Natural acoustic ring-down tail (45ms release) - eliminates cut-offs and clicks
- * 6. Continuous body resonance without harsh filter resets between notes
- * 7. Soft-knee limiting (tanh) for zero harsh digital clipping
+ * 6. Continuous Stradivarius body resonance without harsh filter resets between notes
+ * 7. Soft-knee limiting (tanh) for warm wooden acoustic saturation
  */
 class BowedViolinModel {
 public:
@@ -152,7 +173,11 @@ public:
 
         if (!is_legato) {
             vibrato_phase_ = 0.0f;
-            // Never reset body filters here! Leaving wood and air resonance preserves natural violin warmth
+            neck_line_.clear();
+            bridge_line_.clear();
+            neck_filter_state_ = 0.0f;
+            bridge_filter_state_ = 0.0f;
+            // Preserving body filter state carries natural wooden ring-down
         }
     }
 
@@ -182,9 +207,8 @@ public:
         }
 
         // 1. Adaptive bow velocity envelope
-        // Fast attack (3-8 ms) so fast staccato/spiccato notes start crisp without lag
-        const float max_attack = is_short_note_ ? 0.005f : 0.012f;
-        const float attack_time = std::min(max_attack, total_duration_ * 0.10f);
+        const float max_attack = is_short_note_ ? 0.008f : 0.024f;
+        const float attack_time = std::min(max_attack, total_duration_ * 0.15f);
 
         float bow_env = 0.0f;
         if (elapsed_sec_ < total_duration_) {
@@ -208,13 +232,13 @@ public:
             output_env = output_env * output_env; // Exponential-like decay
         }
 
-        // 2. Fundamental frequency with authentic violin vibrato
+        // 2. Fundamental frequency with authentic violin vibrato (~18 cents depth)
         float current_freq = target_freq_;
         if (enable_vibrato_) {
-            vibrato_phase_ += 2.0f * 3.14159265f * 5.5f / sample_rate_;
+            vibrato_phase_ += 2.0f * 3.14159265f * 5.4f / sample_rate_;
             if (vibrato_phase_ >= 6.2831853f) vibrato_phase_ -= 6.2831853f;
             const float vibrato_ramp = std::min(1.0f, std::max(0.0f, (elapsed_sec_ - 0.06f) / 0.10f));
-            current_freq = target_freq_ * (1.0f + 0.0035f * vibrato_ramp * std::sin(vibrato_phase_));
+            current_freq = target_freq_ * (1.0f + 0.0105f * vibrato_ramp * std::sin(vibrato_phase_));
         }
 
         // 3. Waveguide delays with exact filter phase-delay compensation
@@ -233,7 +257,6 @@ public:
         const float neck_incoming = neck_line_.read(neck_delay);
 
         // 5. Bow-string interaction (Hyperbolic stick-slip friction characteristic)
-        // For short notes, provide an extra micro-bite at onset
         const float bite = (is_short_note_ && elapsed_sec_ < 0.015f) ? 1.25f : 1.0f;
         const float bow_velocity = 0.24f * bow_env * bite;
         const float string_velocity = bridge_incoming + neck_incoming;
@@ -243,10 +266,10 @@ public:
         const float norm_v = relative_velocity / v0;
         const float friction = 1.0f / (1.0f + 1.8f * norm_v * norm_v);
 
-        // Subtle breath / rosin noise (0.2%)
+        // Subtle horsehair rosin friction noise (0.3%)
         noise_seed_ = (noise_seed_ * 196314165u + 907633515u);
         const float white_noise = static_cast<float>(static_cast<int32_t>(noise_seed_)) / 2147483648.0f;
-        const float rosin_noise = 0.002f * white_noise * bow_env;
+        const float rosin_noise = 0.003f * white_noise * bow_env;
 
         const float reflected_velocity = (relative_velocity + rosin_noise) * friction;
 
@@ -267,23 +290,29 @@ public:
         // 9. Soundboard excitation (net force on bridge)
         const float bridge_force = to_bridge - bridge_reflected;
 
-        // 10. Stradivarius Body Resonator Filter Bank
+        // 10. Multi-stage Stradivarius Wooden Body Resonator Filter Bank
         float body_sound = hp_dc_filter_.process(bridge_force);
         body_sound = body_air_filter_.process(body_sound);
         body_sound = body_wood_filter_.process(body_sound);
+        body_sound = body_upper_bout_.process(body_sound);
+        body_sound = body_nasal_filter_.process(body_sound);
         body_sound = body_bridge_filter_.process(body_sound);
+        body_sound = body_wood_damping_.process(body_sound);
 
-        // Soft-knee limiting (tanh) for zero digital distortion
-        const float out = std::tanh(body_sound * 0.38f) * output_env;
+        // Soft-knee limiting (tanh) for warm wooden acoustic saturation
+        const float out = std::tanh(body_sound * 0.20f) * output_env * 0.85f;
         return out;
     }
 
 private:
     void initFilters() {
         hp_dc_filter_.setHighpass(sample_rate_, 90.0f, 0.707f);
-        body_air_filter_.setPeaking(sample_rate_, 280.0f, 2.5f, 2.5f);
-        body_wood_filter_.setPeaking(sample_rate_, 470.0f, 3.0f, 2.5f);
-        body_bridge_filter_.setPeaking(sample_rate_, 2750.0f, 1.8f, 2.0f);
+        body_air_filter_.setPeaking(sample_rate_, 280.0f, 8.0f, 3.5f);
+        body_wood_filter_.setPeaking(sample_rate_, 470.0f, 10.5f, 3.8f);
+        body_upper_bout_.setPeaking(sample_rate_, 580.0f, 5.0f, 2.8f);
+        body_nasal_filter_.setPeaking(sample_rate_, 1500.0f, -4.0f, 1.6f);
+        body_bridge_filter_.setPeaking(sample_rate_, 2800.0f, 7.0f, 2.2f);
+        body_wood_damping_.setLowpass(sample_rate_, 5200.0f, 0.7071f);
     }
 
     float sample_rate_{44100.0f};
@@ -304,7 +333,10 @@ private:
     BiquadFilter hp_dc_filter_;
     BiquadFilter body_air_filter_;
     BiquadFilter body_wood_filter_;
+    BiquadFilter body_upper_bout_;
+    BiquadFilter body_nasal_filter_;
     BiquadFilter body_bridge_filter_;
+    BiquadFilter body_wood_damping_;
 };
 
 } // namespace violin

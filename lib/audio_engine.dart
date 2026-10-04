@@ -5,6 +5,7 @@ import 'dart:isolate';
 import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
 import 'package:flutter/services.dart' show MethodChannel;
+import 'services/song_audio_generator.dart';
 
 /// -------------------------------------------------------------------------
 /// Native ABI
@@ -330,6 +331,13 @@ class AudioEngine {
     _tonePlayingTimer = Timer(Duration(milliseconds: (durationSec * 1000).toInt() + 100), () {
       _isTonePlayingDart = false;
     });
+
+    final pcmFn = _playPcmBuffer;
+    if (pcmFn != null && frequencyHz > 20.0) {
+      final pcm = SongAudioGenerator.generateSingleNotePcm(frequencyHz, durationSec);
+      playPcmBuffer(pcm);
+      return;
+    }
 
     final fn = _playTone;
     if (fn != null) {
