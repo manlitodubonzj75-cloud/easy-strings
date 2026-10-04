@@ -12,6 +12,7 @@ import '../services/midi_parser.dart';
 import '../services/omr_parser.dart';
 import '../services/midi_generator.dart';
 import '../services/song_audio_generator.dart';
+import '../services/ddsp_violin_synthesizer.dart';
 import '../theme/apple_violin_theme.dart';
 import 'widgets/musical_staff_view.dart';
 
@@ -78,6 +79,12 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
   int _lastNotePlayed = -1;
   Timer? _demoTimer;
   Stopwatch? _demoStopwatch;
+  bool _isRenderingDdsp = false;
+  String _ddspStatus = '';
+  double _ddspProgress = 0.0;
+  Float32List? _cachedDdspPcm;
+  String? _cachedDdspSongId;
+  double? _cachedDdspSpeed;
   int _demoFromMs = 0;
   int _nextNoteIndex = 0;
 
@@ -134,6 +141,7 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
     _demoTimer?.cancel();
     _demoStopwatch?.stop();
     widget.audioEngine.stopTone();
+    _cachedDdspPcm = null;
     setState(() {
       _isDemoPlaying = false;
       _isDemoPaused = false;
@@ -179,7 +187,9 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
   }
 
 
-  void _startDemo({int fromMs = 0}) {
+  Future<void> _startDemo({int fromMs = 0}) async {
+    if (_isRenderingDdsp) return;
+
     _playbackTimer?.cancel();
     _demoTimer?.cancel();
     _demoStopwatch?.stop();
@@ -187,6 +197,65 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
 
     final clampedFromMs = fromMs.clamp(0, _currentSong.totalDurationMs);
     _demoFromMs = clampedFromMs;
+
+    // Pre-render entire score using Neural DDSP (Bach Violin model)
+    if (_cachedDdspPcm == null ||
+        _cachedDdspSongId != _currentSong.id ||
+        _cachedDdspSpeed != _playbackSpeed) {
+      setState(() {
+        _isRenderingDdsp = true;
+        _ddspProgress = 0.05;
+        _ddspStatus = 'Загрузка ИИ-нейросети DDSP (Bach Violin)...';
+      });
+
+      try {
+        final pcm = await DdspViolinSynthesizer.synthesizeSong(
+          _currentSong,
+          speedMultiplier: _playbackSpeed,
+          onProgress: (p, s) {
+            if (mounted) {
+              setState(() {
+                _ddspProgress = p;
+                _ddspStatus = s;
+              });
+            }
+          },
+        );
+        _cachedDdspPcm = pcm;
+        _cachedDdspSongId = _currentSong.id;
+        _cachedDdspSpeed = _playbackSpeed;
+      } catch (_) {
+        _cachedDdspPcm = SongAudioGenerator.generatePcm(
+          _currentSong,
+          sampleRate: 44100,
+          speedMultiplier: _playbackSpeed,
+          addHarmonics: true,
+          addVibrato: true,
+          addMeasureDynamics: true,
+        );
+        _cachedDdspSongId = _currentSong.id;
+        _cachedDdspSpeed = _playbackSpeed;
+      } finally {
+        if (mounted) {
+          setState(() {
+            _isRenderingDdsp = false;
+          });
+        }
+      }
+    }
+
+    if (!mounted) return;
+
+    // Audio launches ONLY AFTER the entire piece is fully rendered!
+    final fullPcm = _cachedDdspPcm!;
+    final timeDilation = 1.0 / _playbackSpeed.clamp(0.1, 4.0);
+    final startSec = (clampedFromMs * timeDilation) / 1000.0;
+    final startSample = (startSec * 44100).round().clamp(0, fullPcm.length);
+    final pcmSamples = (startSample == 0)
+        ? fullPcm
+        : Float32List.sublistView(fullPcm, startSample);
+
+    widget.audioEngine.playPcmBuffer(pcmSamples);
     _demoStopwatch = Stopwatch()..start();
 
     // Fast O(1) monotonic cursor for notes
@@ -206,18 +275,6 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
         break;
       }
     }
-
-    // High-fidelity pre-rendered PCM stream: measure-aligned, authentic harmonics, zero UI jitter
-    final pcmSamples = SongAudioGenerator.generatePcm(
-      _currentSong,
-      sampleRate: 44100,
-      speedMultiplier: _playbackSpeed,
-      startFromMs: clampedFromMs,
-      addHarmonics: true,
-      addVibrato: true,
-      addMeasureDynamics: true,
-    );
-    widget.audioEngine.playPcmBuffer(pcmSamples);
 
     setState(() {
       _isPlaying = false;
@@ -1559,7 +1616,54 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
   }
 
   Widget _buildPlaybackControls() {
-    return Row(
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (_isRenderingDdsp) ...[
+          Container(
+            margin: const EdgeInsets.only(bottom: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+            decoration: BoxDecoration(
+              color: AppleViolinTheme.cardDark,
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: AppleViolinTheme.highVoltageLime.withValues(alpha: 0.35)),
+            ),
+            child: Row(
+              children: [
+                const SizedBox(
+                  width: 14,
+                  height: 14,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: AppleViolinTheme.highVoltageLime,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    _ddspStatus,
+                    style: const TextStyle(
+                      fontSize: 11,
+                      color: Colors.white70,
+                      fontFamily: 'monospace',
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  '${(_ddspProgress * 100).toInt()}%',
+                  style: const TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                    color: AppleViolinTheme.highVoltageLime,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+        Row(
       children: [
         _glassIconButton(icon: Icons.refresh_rounded, onTap: _resetPractice),
         const SizedBox(width: 8),
@@ -1610,6 +1714,8 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
           ),
         ),
       ],
+    ),
+    ],
     );
   }
 
