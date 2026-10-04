@@ -5,6 +5,7 @@ import "package:flutter/services.dart";
 import "../models/song_model.dart";
 import "../music_theory.dart";
 import "midi_parser.dart";
+import "onnx_pitch_transcriber.dart";
 
 class AudioTranscriberResult {
   final Song song;
@@ -55,41 +56,84 @@ class AudioTranscriber {
     }
 
     final durationSec = (pcmSamples.length / targetSampleRate) * speedMultiplier;
-    onProgress?.call(0.3, "Анализ основного тона и обертонов...");
 
-    // Extract pitch and energy contours over time with high temporal resolution (5ms hop, 200 fps)
-    final frames = _extractPitchFrames(pcmSamples, targetSampleRate);
-    if (frames.isEmpty) {
-      throw const FormatException("В аудиозаписи не обнаружено устойчивых музыкальных звуков");
+    // 1. Neural AI transcription via Spotify Basic Pitch ONNX
+    List<SongNote>? aiNotes;
+    try {
+      final onnxReady = await OnnxPitchTranscriber.initialize();
+      if (onnxReady) {
+        onProgress?.call(0.25, "Нейросетевая транскрипция (Spotify Basic Pitch ONNX)...");
+        final detected = await OnnxPitchTranscriber.transcribe(
+          audioSamples: pcmSamples,
+          speedMultiplier: speedMultiplier,
+          noteThreshold: 0.25,
+          onsetThreshold: 0.32,
+          onProgress: onProgress,
+        );
+        if (detected.isNotEmpty) {
+          aiNotes = detected;
+        }
+      }
+    } catch (_) {
+      // Fallback seamlessly to algorithmic MPM DSP
     }
 
-    onProgress?.call(0.6, "Детекция атак и фразировки смычка...");
-    final rawNotes = _segmentNotes(frames, targetSampleRate);
-
-    if (rawNotes.isEmpty) {
-      throw const FormatException("Не удалось выделить нотные события в диапазоне скрипки");
+    if (aiNotes != null && aiNotes.isNotEmpty) {
+      final bpm = _estimateBpmFromSongNotes(aiNotes);
+      final keySignature = _estimateKeySignature(aiNotes);
+      final song = Song(
+        id: "transcribed_${DateTime.now().millisecondsSinceEpoch}",
+        title: title,
+        composer: "Spotify Basic Pitch ONNX",
+        tempoBpm: bpm,
+        notes: aiNotes,
+      );
+      final report = "Нейросетевая транскрипция (ONNX Basic Pitch): Распознано ${aiNotes.length} нот, темп ~$bpm BPM ($keySignature), ${durationSec.toStringAsFixed(1)} сек.";
+      onProgress?.call(1.0, "Готово!");
+      return AudioTranscriberResult(
+        song: song,
+        totalNotesDetected: aiNotes.length,
+        durationSeconds: durationSec,
+        estimatedBpm: bpm,
+        detectedKey: keySignature,
+        report: report,
+      );
     }
 
-    onProgress?.call(0.8, "Музыкальное квантование и расчет аппликатуры...");
-    final bpm = _estimateBpm(rawNotes, speedMultiplier: speedMultiplier);
-    final songNotes = _buildViolinNotes(rawNotes, bpm, speedMultiplier: speedMultiplier);
+    // 2. Algorithmic fallback: MPM (McLeod Pitch Method) + onset detection
+    onProgress?.call(0.3, "Анализ частот и поиск нот (MPM)...");
+    final rawNotes = _extractNotesFromAudio(
+      pcmSamples,
+      targetSampleRate,
+      speedMultiplier: speedMultiplier,
+      onProgress: (p) => onProgress?.call(0.3 + p * 0.45, "Анализ частот и поиск нот..."),
+    );
 
-    final keySignature = _estimateKeySignature(songNotes);
+    onProgress?.call(0.8, "Фильтрация и устранение нахлёстов...");
+    final monophonicNotes = _enforceMonophony(rawNotes, speedMultiplier: speedMultiplier);
+
+    if (monophonicNotes.isEmpty) {
+      throw const FormatException("В аудиозаписи не удалось обнаружить скрипичные ноты");
+    }
+
+    onProgress?.call(0.9, "Определение темпа и тональности...");
+    final bpm = _estimateBpm(monophonicNotes);
+    final keySignature = _estimateKeySignature(monophonicNotes);
 
     final song = Song(
       id: "transcribed_${DateTime.now().millisecondsSinceEpoch}",
       title: title,
-      composer: "Audio AI Transcription",
+      composer: "Распознано EasyViolin",
       tempoBpm: bpm,
-      notes: songNotes,
+      notes: monophonicNotes,
     );
 
-    final report = "Распознано ${songNotes.length} нот, темп ~$bpm BPM ($keySignature), ${durationSec.toStringAsFixed(1)} сек.";
+    final report = "Распознано ${monophonicNotes.length} нот, темп ~$bpm BPM ($keySignature), ${durationSec.toStringAsFixed(1)} сек.";
     onProgress?.call(1.0, "Готово!");
 
     return AudioTranscriberResult(
       song: song,
-      totalNotesDetected: songNotes.length,
+      totalNotesDetected: monophonicNotes.length,
       durationSeconds: durationSec,
       estimatedBpm: bpm,
       detectedKey: keySignature,
@@ -97,555 +141,440 @@ class AudioTranscriber {
     );
   }
 
-  /// Decodes WAV container or raw float PCM into normalized Float32 mono samples.
-  static Future<Float32List> _decodeAudioToMonoFloat32(Uint8List bytes) async {
-    // 1. Canonical WAV
-    if (bytes.length >= 12 &&
-        String.fromCharCodes(bytes.sublist(0, 4)) == "RIFF" &&
-        String.fromCharCodes(bytes.sublist(8, 12)) == "WAVE") {
-      return _parseWav(bytes);
-    }
+  /// Estimates musical tempo (BPM) from transcribed notes using inter-onset intervals (IOI).
+  static int _estimateBpmFromSongNotes(List<SongNote> notes) {
+    if (notes.length < 2) return 100;
 
-    // 2. Android hardware MediaCodec decoding (AAC, M4A, MP3, etc. -> PCM WAV)
-    try {
-      if (Platform.isAndroid) {
-        final decodedWav = await _decoderChannel.invokeMethod<Uint8List>("decodeToWav", {
-          "audioBytes": bytes,
-        });
-        if (decodedWav != null && decodedWav.length >= 44) {
-          return _parseWav(decodedWav);
-        }
-      }
-    } catch (_) {}
-
-    // 3. Desktop ffmpeg fallback
-    try {
-      if (!Platform.isAndroid && !Platform.isIOS) {
-        final ffmpeg = _findFfmpeg();
-        if (ffmpeg != null) {
-          final tempDir = Directory.systemTemp;
-          final id = "transcribe_${DateTime.now().millisecondsSinceEpoch}";
-          final inPath = "${tempDir.path}/$id.input";
-          final outPath = "${tempDir.path}/$id.wav";
-          File(inPath).writeAsBytesSync(bytes);
-          final res = await Process.run(ffmpeg, ["-y", "-i", inPath, "-ar", "22050", "-ac", "1", outPath]);
-          if (res.exitCode == 0 && File(outPath).existsSync()) {
-            final wavData = await File(outPath).readAsBytes();
-            try { File(inPath).deleteSync(); } catch (_) {}
-            try { File(outPath).deleteSync(); } catch (_) {}
-            return _parseWav(wavData);
-          }
-        }
-      }
-    } catch (_) {}
-
-    // 4. Fallback: assume raw 16-bit signed PCM at 44100 or 22050
-    final numSamples = bytes.length ~/ 2;
-    final samples = Float32List(numSamples);
-    final byteData = ByteData.sublistView(bytes);
-
-    for (int i = 0; i < numSamples; i++) {
-      final sampleInt = byteData.getInt16(i * 2, Endian.little);
-      samples[i] = sampleInt / 32768.0;
-    }
-
-    return _resample(samples, 44100, targetSampleRate);
-  }
-
-  static String? _findFfmpeg() {
-    for (final p in ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg", "ffmpeg"]) {
-      if (p.startsWith("/")) {
-        if (File(p).existsSync()) return p;
-      }
-    }
-    return null;
-  }
-
-  /// Parses canonical RIFF/WAVE header
-  static Float32List _parseWav(Uint8List bytes) {
-    final byteData = ByteData.sublistView(bytes);
-    int offset = 12;
-
-    int channels = 1;
-    int sampleRate = 44100;
-    int bitsPerSample = 16;
-    int audioFormat = 1; // 1 = PCM, 3 = IEEE Float
-
-    Uint8List? audioData;
-
-    while (offset + 8 <= bytes.length) {
-      final chunkId = String.fromCharCodes(bytes.sublist(offset, offset + 4));
-      final chunkSize = byteData.getUint32(offset + 4, Endian.little);
-      offset += 8;
-
-      if (chunkId == "fmt ") {
-        audioFormat = byteData.getUint16(offset, Endian.little);
-        channels = byteData.getUint16(offset + 2, Endian.little);
-        sampleRate = byteData.getUint32(offset + 4, Endian.little);
-        bitsPerSample = byteData.getUint16(offset + 14, Endian.little);
-      } else if (chunkId == "data") {
-        final dataEnd = math.min(bytes.length, offset + chunkSize);
-        audioData = bytes.sublist(offset, dataEnd);
-        break;
-      }
-      offset += chunkSize;
-    }
-
-    if (audioData == null) {
-      throw const FormatException("Не найден data-блок в WAV-файле");
-    }
-
-    final dataView = ByteData.sublistView(audioData);
-    final bytesPerSample = bitsPerSample ~/ 8;
-    if (bytesPerSample == 0) return Float32List(0);
-
-    final totalFrames = audioData.length ~/ (bytesPerSample * channels);
-    final monoSamples = Float32List(totalFrames);
-
-    for (int f = 0; f < totalFrames; f++) {
-      double sum = 0.0;
-      for (int ch = 0; ch < channels; ch++) {
-        final sampleOffset = (f * channels + ch) * bytesPerSample;
-        if (sampleOffset + bytesPerSample > audioData.length) break;
-
-        double sampleVal = 0.0;
-        if (audioFormat == 3 && bitsPerSample == 32) {
-          sampleVal = dataView.getFloat32(sampleOffset, Endian.little);
-        } else if (bitsPerSample == 16) {
-          sampleVal = dataView.getInt16(sampleOffset, Endian.little) / 32768.0;
-        } else if (bitsPerSample == 24) {
-          final b0 = dataView.getUint8(sampleOffset);
-          final b1 = dataView.getUint8(sampleOffset + 1);
-          final b2 = dataView.getInt8(sampleOffset + 2);
-          final intVal = (b2 << 16) | (b1 << 8) | b0;
-          sampleVal = intVal / 8388608.0;
-        } else if (bitsPerSample == 8) {
-          sampleVal = (dataView.getUint8(sampleOffset) - 128) / 128.0;
-        }
-        sum += sampleVal;
-      }
-      monoSamples[f] = sum / channels;
-    }
-
-    if (sampleRate == targetSampleRate) {
-      return monoSamples;
-    }
-    return _resample(monoSamples, sampleRate, targetSampleRate);
-  }
-
-  /// Linear resampling from inRate to outRate
-  static Float32List _resample(Float32List input, int inRate, int outRate) {
-    if (inRate == outRate || input.isEmpty) return input;
-    final ratio = inRate / outRate;
-    final outLength = (input.length / ratio).floor();
-    final output = Float32List(outLength);
-
-    for (int i = 0; i < outLength; i++) {
-      final inIdx = i * ratio;
-      final i0 = inIdx.floor();
-      final i1 = math.min(i0 + 1, input.length - 1);
-      final frac = inIdx - i0;
-      output[i] = input[i0] * (1.0 - frac) + input[i1] * frac;
-    }
-
-    return output;
-  }
-
-  /// Extracts pitch and energy frames with high temporal resolution (5ms hop, 200 fps).
-  /// This temporal precision allows transcribing 1/16 and 1/32 notes down to 25-50ms.
-  static List<PitchFrame> _extractPitchFrames(Float32List audio, int sampleRate) {
-    // 35ms window (772 samples at 22050Hz): provides 7 full cycles at G3 (196Hz) for rock-solid pitch stability
-    // while remaining tight enough to cleanly resolve fast 1/32 notes without cross-note bleeding
-    final frameSize = (sampleRate * 0.035).round();
-    final hopSize = (sampleRate * 0.005).round(); // 5ms hop (200 fps) for ultra-fine onset resolution
-    final rawFrames = <PitchFrame>[];
-
-    // Cumulative sum of squares for O(1) RMS energy computation
-    final cumSumSq = Float64List(audio.length + 1);
-    for (int i = 0; i < audio.length; i++) {
-      cumSumSq[i + 1] = cumSumSq[i] + audio[i] * audio[i];
-    }
-
-    for (int start = 0; start + frameSize <= audio.length; start += hopSize) {
-      final timeSec = start / sampleRate.toDouble();
-      final energySum = cumSumSq[start + frameSize] - cumSumSq[start];
-      final rms = math.sqrt(math.max(0.0, energySum / frameSize));
-
-      if (rms < 0.0035) {
-        rawFrames.add(PitchFrame(timeSec: timeSec, pitchHz: 0.0, midiNote: 0, energy: rms, confidence: 0.0));
-        continue;
-      }
-
-      // Zero-copy view into audio array
-      final frame = Float32List.sublistView(audio, start, start + frameSize);
-      final (detectedHz, conf) = _detectPitchMpmFast(frame, sampleRate);
-      if (detectedHz > 0 && conf >= 0.35) {
-        final frac = 69.0 + 12.0 * (math.log(detectedHz / 440.0) / math.ln2);
-        final midi = frac.round();
-        if (midi >= minViolinMidi && midi <= maxViolinMidi) {
-          rawFrames.add(PitchFrame(
-            timeSec: timeSec,
-            pitchHz: detectedHz,
-            midiNote: midi,
-            midiFraction: frac,
-            energy: rms,
-            confidence: conf,
-          ));
-        } else {
-          rawFrames.add(PitchFrame(
-            timeSec: timeSec,
-            pitchHz: 0.0,
-            midiNote: 0,
-            midiFraction: 0.0,
-            energy: rms,
-            confidence: 0.0,
-          ));
-        }
-      } else {
-        rawFrames.add(PitchFrame(
-          timeSec: timeSec,
-          pitchHz: 0.0,
-          midiNote: 0,
-          midiFraction: 0.0,
-          energy: rms,
-          confidence: 0.0,
-        ));
+    final intervals = <int>[];
+    for (int i = 0; i < notes.length - 1; i++) {
+      final ioi = notes[i + 1].startTimeMs - notes[i].startTimeMs;
+      if (ioi >= 80 && ioi <= 2000) {
+        intervals.add(ioi);
       }
     }
 
-    return _smoothPitchFrames(rawFrames);
-  }
-
-  /// Edge-preserving pitch trajectory filter.
-  /// Eliminates natural violin vibrato oscillations (~5-7 Hz, +-50 cents) on sustained notes
-  /// while preserving sharp step boundaries on genuine note transitions.
-  static List<PitchFrame> _smoothPitchFrames(List<PitchFrame> frames) {
-    if (frames.length < 5) return frames;
-    final smoothed = List<PitchFrame>.from(frames);
-
-    const halfWin = 3; // 7-frame window (~35ms at 5ms hop): preserves 1/32 notes while smoothing vibrato
-    for (int i = 0; i < frames.length; i++) {
-      final curr = frames[i];
-      if (curr.midiFraction <= 0) continue;
-
-      final start = math.max(0, i - halfWin);
-      final end = math.min(frames.length - 1, i + halfWin);
-
-      final fractions = <double>[];
-      for (int j = start; j <= end; j++) {
-        final fj = frames[j];
-        // DO NOT smooth across sharp pitch steps (>= 0.75 semitone): this preserves intentional note boundaries!
-        if (fj.midiFraction > 0 && (fj.midiFraction - curr.midiFraction).abs() <= 0.75) {
-          fractions.add(fj.midiFraction);
-        }
-      }
-
-      if (fractions.length >= 2) {
-        fractions.sort();
-        final medFrac = fractions[fractions.length ~/ 2];
-        final medMidi = medFrac.round();
-        final medHz = 440.0 * math.pow(2.0, (medFrac - 69.0) / 12.0).toDouble();
-
-        smoothed[i] = PitchFrame(
-          timeSec: curr.timeSec,
-          pitchHz: medHz,
-          midiNote: medMidi,
-          midiFraction: medFrac,
-          energy: curr.energy,
-          confidence: curr.confidence,
-        );
-      }
-    }
-
-    return smoothed;
-  }
-
-  /// McLeod Pitch Method (Normalized Square Difference Function) - High Performance.
-  /// Uses running sum of squares for O(1) denominator and peak-picking with threshold factor 0.88 * highestPeak.
-  static (double freq, double confidence) _detectPitchMpmFast(Float32List frame, int sampleRate) {
-    final n = frame.length;
-    final maxTau = (sampleRate / 130.0).round(); // Down to C3 (~130Hz)
-    final minTau = (sampleRate / 2600.0).round(); // Up to ~E7 (2600Hz)
-
-    if (maxTau >= n) return (0.0, 0.0);
-
-    // Precompute cumulative squares inside frame for O(1) denominator
-    final cumSq = Float64List(n + 1);
-    for (int i = 0; i < n; i++) {
-      cumSq[i + 1] = cumSq[i] + frame[i] * frame[i];
-    }
-
-    // Compute NSDF
-    final nsdf = Float32List(maxTau + 1);
-    for (int tau = minTau; tau <= maxTau; tau++) {
-      final len = n - tau;
-      double acf = 0.0;
-      for (int i = 0; i < len; i++) {
-        acf += frame[i] * frame[i + tau];
-      }
-      final m = (cumSq[len] - cumSq[0]) + (cumSq[n] - cumSq[tau]);
-      nsdf[tau] = (m > 1e-9) ? (2.0 * acf / m).clamp(-1.0, 1.0) : 0.0;
-    }
-
-    // 1. Identify all key maxima (positive peaks between zero crossings)
-    final peakTaus = <int>[];
-    double highestPeak = 0.0;
-
-    for (int tau = minTau + 1; tau < maxTau; tau++) {
-      if (nsdf[tau] > 0.0 && nsdf[tau] > nsdf[tau - 1] && nsdf[tau] > nsdf[tau + 1]) {
-        peakTaus.add(tau);
-        if (nsdf[tau] > highestPeak) {
-          highestPeak = nsdf[tau];
-        }
-      }
-    }
-
-    if (peakTaus.isEmpty || highestPeak < 0.38) return (0.0, 0.0);
-
-    // 2. Select the FIRST key maximum exceeding threshold factor k * highestPeak (k = 0.88)
-    final cutoff = 0.88 * highestPeak;
-    int bestTau = 0;
-    for (final tau in peakTaus) {
-      if (nsdf[tau] >= cutoff) {
-        bestTau = tau;
-        break;
-      }
-    }
-
-    if (bestTau == 0) bestTau = peakTaus.first;
-
-    // 3. Parabolic interpolation for fine sub-sample frequency accuracy
-    final alpha = nsdf[bestTau - 1];
-    final beta = nsdf[bestTau];
-    final gamma = nsdf[bestTau + 1];
-    final denom = 2.0 * (2.0 * beta - alpha - gamma);
-    final delta = denom.abs() > 1e-9 ? (gamma - alpha) / denom : 0.0;
-    final fineTau = bestTau + delta;
-
-    final freq = sampleRate / fineTau;
-    return (freq, highestPeak);
-  }
-
-  /// Segments continuous pitch frames into distinct note events.
-  /// Accurately detects repeated notes of the same pitch (via energy dip / re-articulation valleys)
-  /// and distinguishes 1/32 note passages from sustained notes.
-  static List<RawNoteEvent> _segmentNotes(List<PitchFrame> frames, int sampleRate) {
-    final rawNotes = <RawNoteEvent>[];
-    int currentMidi = 0;
-    double startTime = 0.0;
-    double accumulatedEnergy = 0.0;
-    int noteFrameCount = 0;
-    int silenceBridgeFrames = 0;
-    double prevEnergy = 0.0;
-    double peakEnergyInNote = 0.0;
-    double valleyEnergyInNote = 1e9;
-
-    int candidateMidi = 0;
-    int candidateFrameCount = 0;
-    double candidateStartTime = 0.0;
-    bool noteHasOnset = false;
-
-    void flushNote(double endTime) {
-      final dur = endTime - startTime;
-      final minRequiredDur = noteHasOnset ? 0.020 : 0.035;
-      if (dur >= minRequiredDur && noteFrameCount >= 2) {
-        rawNotes.add(RawNoteEvent(
-          midiNote: currentMidi,
-          startTimeSec: startTime,
-          durationSec: dur,
-          avgEnergy: accumulatedEnergy / noteFrameCount,
-        ));
-      }
-    }
-
-    for (int i = 0; i < frames.length; i++) {
-      final f = frames[i];
-
-      if (f.midiNote > 0) {
-        silenceBridgeFrames = 0;
-
-        if (currentMidi == 0) {
-          currentMidi = f.midiNote;
-          startTime = f.timeSec;
-          accumulatedEnergy = f.energy;
-          noteFrameCount = 1;
-          peakEnergyInNote = f.energy;
-          valleyEnergyInNote = f.energy;
-          candidateMidi = 0;
-          candidateFrameCount = 0;
-          noteHasOnset = true;
-        } else {
-          if (f.energy > peakEnergyInNote) peakEnergyInNote = f.energy;
-          if (f.energy < valleyEnergyInNote) valleyEnergyInNote = f.energy;
-
-          // Check for attack onset:
-          // 1. Direct energy rise
-          // 2. Re-articulation valley between repeated notes of the same pitch
-          final isEnergySurge = (noteFrameCount >= 3 && f.energy > prevEnergy * 1.35 && f.energy > 0.008);
-          final isRearticulationValley = (noteFrameCount >= 3 &&
-              valleyEnergyInNote < peakEnergyInNote * 0.72 &&
-              f.energy > valleyEnergyInNote * 1.30 &&
-              f.energy > 0.008);
-
-          if (isEnergySurge || isRearticulationValley) {
-            flushNote(f.timeSec);
-            currentMidi = f.midiNote;
-            startTime = f.timeSec;
-            accumulatedEnergy = f.energy;
-            noteFrameCount = 1;
-            peakEnergyInNote = f.energy;
-            valleyEnergyInNote = f.energy;
-            candidateMidi = 0;
-            candidateFrameCount = 0;
-            noteHasOnset = true;
-          } else {
-            // Check semitone deviation from active note
-            final semitoneDiff = (f.midiFraction - currentMidi).abs();
-
-            if (semitoneDiff <= 0.60) {
-              // Within natural vibrato band (+-60 cents) -> belongs to current note!
-              accumulatedEnergy += f.energy;
-              noteFrameCount++;
-              candidateMidi = 0;
-              candidateFrameCount = 0;
-            } else {
-              // Pitch step to a new note
-              final targetMidi = f.midiFraction.round();
-              if (targetMidi == currentMidi) {
-                accumulatedEnergy += f.energy;
-                noteFrameCount++;
-                candidateMidi = 0;
-                candidateFrameCount = 0;
-              } else {
-                if (candidateMidi == targetMidi) {
-                  candidateFrameCount++;
-                  final requiredFrames = (targetMidi - currentMidi).abs() >= 2 ? 2 : 3;
-                  if (candidateFrameCount >= requiredFrames) {
-                    flushNote(candidateStartTime);
-                    currentMidi = candidateMidi;
-                    startTime = candidateStartTime;
-                    accumulatedEnergy = f.energy * candidateFrameCount;
-                    noteFrameCount = candidateFrameCount;
-                    peakEnergyInNote = f.energy;
-                    valleyEnergyInNote = f.energy;
-                    candidateMidi = 0;
-                    candidateFrameCount = 0;
-                    noteHasOnset = false;
-                  }
-                } else {
-                  candidateMidi = targetMidi;
-                  candidateFrameCount = 1;
-                  candidateStartTime = f.timeSec;
-                }
-              }
-            }
-          }
-        }
-        prevEnergy = f.energy;
-      } else {
-        // Micro-pause / bow-turnaround: bridge up to 12 frames (~60ms at 5ms hop)
-        if (currentMidi > 0) {
-          silenceBridgeFrames++;
-          if (silenceBridgeFrames > 12) {
-            flushNote(f.timeSec - (silenceBridgeFrames * 0.005));
-            currentMidi = 0;
-            noteFrameCount = 0;
-            silenceBridgeFrames = 0;
-            candidateMidi = 0;
-            candidateFrameCount = 0;
-          }
-        }
-      }
-    }
-
-    if (currentMidi > 0 && noteFrameCount >= 2) {
-      flushNote(frames.last.timeSec);
-    }
-
-    return rawNotes;
-  }
-
-  /// Estimates global BPM from inter-onset intervals (IOI) histogram.
-  static int _estimateBpm(List<RawNoteEvent> notes, {double speedMultiplier = 1.0}) {
-    if (notes.length < 3) return (100 * speedMultiplier).round().clamp(60, 200);
-
-    final intervals = <double>[];
-    for (int i = 1; i < notes.length; i++) {
-      final delta = (notes[i].startTimeSec - notes[i - 1].startTimeSec) * speedMultiplier;
-      if (delta >= 0.04 && delta <= 1.5) {
-        intervals.add(delta);
-      }
-    }
-
-    if (intervals.isEmpty) return (100 * speedMultiplier).round().clamp(60, 200);
+    if (intervals.isEmpty) return 100;
 
     intervals.sort();
-    final medianInterval = intervals[intervals.length ~/ 2];
-    var estimatedBpm = (60.0 / medianInterval).round();
+    final medianIoi = intervals[intervals.length ~/ 2];
 
-    // Map into standard comfortable violin practice range [60 .. 200]
-    while (estimatedBpm < 60) {
-      estimatedBpm *= 2;
-    }
-    while (estimatedBpm > 190) {
-      estimatedBpm ~/= 2;
-    }
+    double beatMs = medianIoi.toDouble();
+    while (beatMs < 300) beatMs *= 2.0; // accelerate sub-beats to quarter note
+    while (beatMs > 900) beatMs /= 2.0;
 
-    return estimatedBpm.clamp(60, 200);
+    final bpm = (60000.0 / beatMs).round().clamp(50, 220);
+    return bpm;
   }
 
-  /// Builds quantized Song Note list with violin string and finger positions.
-  ///
-  /// CRITICAL MONOPHONIC GUARANTEE (NO OVERLAP / "БЕЗ НАХЛЁСТА"):
-  /// 1. Note start times are strictly monotonic and sequential.
-  /// 2. Every note's duration is clamped so `note[i].endTimeMs <= note[i+1].startTimeMs`.
-  /// 3. Speed scaling: maps pre-generation slowed audio timestamps back to native tempo.
-  static List<SongNote> _buildViolinNotes(
-    List<RawNoteEvent> rawNotes,
-    int bpm, {
+  /// Internal decoder for audio files into mono Float32List at 22050 Hz.
+  static Future<Float32List> _decodeAudioToMonoFloat32(Uint8List audioBytes) async {
+    // Check if it's already a canonical RIFF WAV file
+    if (_isWavFormat(audioBytes)) {
+      final pcm = _parseWavToMonoFloat32(audioBytes);
+      if (pcm != null && pcm.isNotEmpty) return pcm;
+    }
+
+    // Call native audio decoder via platform channel (AudioToolbox on iOS/macOS, MediaCodec on Android)
+    try {
+      final dynamic result = await _decoderChannel.invokeMethod('decodeAudioFile', {
+        'audioBytes': audioBytes,
+        'targetSampleRate': targetSampleRate,
+      });
+
+      if (result is Float32List) return result;
+      if (result is List) return Float32List.fromList(result.cast<double>());
+    } catch (_) {
+      // Fallback: try raw 16-bit PCM interpretation if byte count is reasonable
+    }
+
+    // Last resort fallback: treat as raw 16-bit PCM mono
+    return _parseRawPcm16(audioBytes);
+  }
+
+  static bool _isWavFormat(Uint8List bytes) {
+    if (bytes.length < 12) return false;
+    final riff = String.fromCharCodes(bytes.sublist(0, 4));
+    final wave = String.fromCharCodes(bytes.sublist(8, 12));
+    return riff == 'RIFF' && wave == 'WAVE';
+  }
+
+  /// Parses 16-bit/24-bit/32-bit PCM/Float WAV data to mono Float32List at 22050Hz.
+  static Float32List? _parseWavToMonoFloat32(Uint8List bytes) {
+    try {
+      final bdata = ByteData.view(bytes.buffer, bytes.offsetInBytes, bytes.lengthInBytes);
+      int offset = 12; // Skip RIFF header
+
+      int audioFormat = 1;
+      int numChannels = 1;
+      int sampleRate = 44100;
+      int bitsPerSample = 16;
+      int dataOffset = -1;
+      int dataSize = 0;
+
+      while (offset + 8 <= bytes.length) {
+        final chunkId = String.fromCharCodes(bytes.sublist(offset, offset + 4));
+        final chunkSize = bdata.getUint32(offset + 4, Endian.little);
+        offset += 8;
+
+        if (chunkId == 'fmt ') {
+          audioFormat = bdata.getUint16(offset, Endian.little);
+          numChannels = bdata.getUint16(offset + 2, Endian.little);
+          sampleRate = bdata.getUint32(offset + 4, Endian.little);
+          bitsPerSample = bdata.getUint16(offset + 14, Endian.little);
+        } else if (chunkId == 'data') {
+          dataOffset = offset;
+          dataSize = chunkSize;
+          break;
+        }
+
+        offset += chunkSize;
+      }
+
+      if (dataOffset == -1 || dataSize <= 0) return null;
+
+      final bytesPerSample = bitsPerSample ~/ 8;
+      if (bytesPerSample <= 0) return null;
+      final totalFrames = dataSize ~/ (numChannels * bytesPerSample);
+      final rawSamples = Float32List(totalFrames);
+
+      for (int i = 0; i < totalFrames; i++) {
+        double frameSum = 0.0;
+        for (int ch = 0; ch < numChannels; ch++) {
+          final sampleOffset = dataOffset + (i * numChannels + ch) * bytesPerSample;
+          if (sampleOffset + bytesPerSample > bytes.length) break;
+
+          double s = 0.0;
+          if (audioFormat == 1) {
+            // Integer PCM
+            if (bitsPerSample == 16) {
+              s = bdata.getInt16(sampleOffset, Endian.little) / 32768.0;
+            } else if (bitsPerSample == 8) {
+              s = (bytes[sampleOffset] - 128) / 128.0;
+            } else if (bitsPerSample == 24) {
+              final b0 = bytes[sampleOffset];
+              final b1 = bytes[sampleOffset + 1];
+              final b2 = bytes[sampleOffset + 2];
+              int val = (b2 << 24) | (b1 << 16) | (b0 << 8);
+              s = (val >> 8) / 8388608.0;
+            }
+          } else if (audioFormat == 3) {
+            // Float PCM
+            if (bitsPerSample == 32) {
+              s = bdata.getFloat32(sampleOffset, Endian.little);
+            }
+          }
+          frameSum += s;
+        }
+        rawSamples[i] = (frameSum / numChannels).clamp(-1.0, 1.0);
+      }
+
+      // Resample to targetSampleRate (22050 Hz) if needed
+      if (sampleRate == targetSampleRate) {
+        return rawSamples;
+      } else {
+        return _resampleLinear(rawSamples, sampleRate, targetSampleRate);
+      }
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Float32List _resampleLinear(Float32List source, int srcRate, int dstRate) {
+    if (srcRate == dstRate || source.isEmpty) return source;
+
+    final ratio = dstRate / srcRate.toDouble();
+    final dstLength = (source.length * ratio).round();
+    final result = Float32List(dstLength);
+
+    for (int i = 0; i < dstLength; i++) {
+      final srcIndex = i / ratio;
+      final indexFloor = srcIndex.floor();
+      final frac = srcIndex - indexFloor;
+
+      if (indexFloor >= source.length - 1) {
+        result[i] = source[source.length - 1];
+      } else {
+        final s0 = source[indexFloor];
+        final s1 = source[indexFloor + 1];
+        result[i] = s0 + frac * (s1 - s0);
+      }
+    }
+
+    return result;
+  }
+
+  static Float32List _parseRawPcm16(Uint8List bytes) {
+    final numSamples = bytes.length ~/ 2;
+    final bdata = ByteData.view(bytes.buffer, bytes.offsetInBytes, bytes.lengthInBytes);
+    final result = Float32List(numSamples);
+    for (int i = 0; i < numSamples; i++) {
+      result[i] = (bdata.getInt16(i * 2, Endian.little) / 32768.0).clamp(-1.0, 1.0);
+    }
+    return result;
+  }
+
+  /// Extracts pitch track and note candidates using McLeod Pitch Method (MPM)
+  /// and RMS energy onset detection.
+  static List<_DetectedNoteCandidate> _extractNotesFromAudio(
+    Float32List samples,
+    int sampleRate, {
+    double speedMultiplier = 1.0,
+    void Function(double progress)? onProgress,
+  }) {
+    // Window settings optimized for violin pitch range (G3 ~ 196Hz to E7 ~ 2637Hz)
+    // 1024 samples @ 22050Hz = ~46.4ms window.
+    // Hop size = 256 samples (~11.6ms), providing temporal resolution for fast 1/32 notes.
+    final windowSize = 1024;
+    final hopSize = 256;
+    final totalFrames = math.max(0, (samples.length - windowSize) ~/ hopSize);
+
+    if (totalFrames == 0) return [];
+
+    final framePitches = <double>[];
+    final frameConfidences = <double>[];
+    final frameEnergies = <double>[];
+
+    final windowBuffer = Float32List(windowSize);
+
+    for (int f = 0; f < totalFrames; f++) {
+      final startIdx = f * hopSize;
+      windowBuffer.setRange(0, windowSize, samples, startIdx);
+
+      // Compute RMS Energy
+      double sumSquares = 0.0;
+      for (int i = 0; i < windowSize; i++) {
+        sumSquares += windowBuffer[i] * windowBuffer[i];
+      }
+      final rms = math.sqrt(sumSquares / windowSize);
+      frameEnergies.add(rms);
+
+      // Pitch detection via McLeod Pitch Method (MPM)
+      if (rms < 0.015) {
+        framePitches.add(0.0);
+        frameConfidences.add(0.0);
+      } else {
+        final (pitchHz, confidence) = _detectPitchMpm(windowBuffer, sampleRate);
+        framePitches.add(pitchHz);
+        frameConfidences.add(confidence);
+      }
+
+      if (f % 100 == 0 && onProgress != null) {
+        onProgress(f / totalFrames);
+      }
+    }
+
+    // Detect Onset Peaks using Energy Flux
+    final onsetFrames = _detectOnsetFrames(frameEnergies, totalFrames);
+
+    // Segment frames into notes
+    final noteCandidates = <_DetectedNoteCandidate>[];
+    _DetectedNoteCandidate? currentCandidate;
+
+    final frameMs = (hopSize / sampleRate) * 1000.0; // ~11.61ms per frame
+
+    for (int f = 0; f < totalFrames; f++) {
+      final pitchHz = framePitches[f];
+      final confidence = frameConfidences[f];
+      final energy = frameEnergies[f];
+      final isOnset = onsetFrames.contains(f);
+
+      final midi = (pitchHz > 0 && confidence >= 0.65) ? MusicTheory.hzToMidi(pitchHz).round() : 0;
+      final isValidViolinNote = midi >= minViolinMidi && midi <= maxViolinMidi;
+
+      final currentMs = (f * frameMs).round();
+
+      if (isValidViolinNote && energy >= 0.02) {
+        if (currentCandidate == null) {
+          currentCandidate = _DetectedNoteCandidate(
+            midiNote: midi,
+            startTimeMs: currentMs,
+            endTimeMs: currentMs + frameMs.round(),
+            confidence: confidence,
+          );
+        } else if (currentCandidate.midiNote == midi) {
+          // Same pitch: if strong onset detected, split note (articulated repeated note)
+          if (isOnset && (currentMs - currentCandidate.startTimeMs) > 60) {
+            noteCandidates.add(currentCandidate);
+            currentCandidate = _DetectedNoteCandidate(
+              midiNote: midi,
+              startTimeMs: currentMs,
+              endTimeMs: currentMs + frameMs.round(),
+              confidence: confidence,
+            );
+          } else {
+            currentCandidate.endTimeMs = currentMs + frameMs.round();
+            currentCandidate.confidence = math.max(currentCandidate.confidence, confidence);
+          }
+        } else {
+          // Pitch changed: end current note and start new note
+          noteCandidates.add(currentCandidate);
+          currentCandidate = _DetectedNoteCandidate(
+            midiNote: midi,
+            startTimeMs: currentMs,
+            endTimeMs: currentMs + frameMs.round(),
+            confidence: confidence,
+          );
+        }
+      } else {
+        // Silence or invalid note
+        if (currentCandidate != null) {
+          noteCandidates.add(currentCandidate);
+          currentCandidate = null;
+        }
+      }
+    }
+
+    if (currentCandidate != null) {
+      noteCandidates.add(currentCandidate);
+    }
+
+    return noteCandidates;
+  }
+
+  /// McLeod Pitch Method (MPM) core pitch detection.
+  static (double, double) _detectPitchMpm(Float32List buffer, int sampleRate) {
+    final n = buffer.length;
+    final maxTau = n ~/ 2;
+    final nsdf = Float32List(maxTau);
+
+    // Normalized Square Difference Function (NSDF)
+    for (int tau = 0; tau < maxTau; tau++) {
+      double acf = 0.0;
+      double m = 0.0;
+      for (int i = 0; i < n - tau; i++) {
+        final x = buffer[i];
+        final y = buffer[i + tau];
+        acf += x * y;
+        m += x * x + y * y;
+      }
+      nsdf[tau] = (m > 1e-6) ? (2.0 * acf / m) : 0.0;
+    }
+
+    // Find key maxima above threshold (k = 0.70)
+    final keyMaxima = <int>[];
+    for (int tau = 1; tau < maxTau - 1; tau++) {
+      if (nsdf[tau] > nsdf[tau - 1] && nsdf[tau] >= nsdf[tau + 1]) {
+        if (nsdf[tau] > 0.45) {
+          keyMaxima.add(tau);
+        }
+      }
+    }
+
+    if (keyMaxima.isEmpty) {
+      return (0.0, 0.0);
+    }
+
+    // Pick highest peak
+    int bestTau = keyMaxima.first;
+    double highestScore = nsdf[bestTau];
+    for (final tau in keyMaxima) {
+      if (nsdf[tau] > highestScore) {
+        highestScore = nsdf[tau];
+        bestTau = tau;
+      }
+    }
+
+    // Parabolic interpolation around bestTau
+    double refinedTau = bestTau.toDouble();
+    if (bestTau > 0 && bestTau < maxTau - 1) {
+      final y0 = nsdf[bestTau - 1];
+      final y1 = nsdf[bestTau];
+      final y2 = nsdf[bestTau + 1];
+      final denom = (2 * (2 * y1 - y0 - y2));
+      if (denom.abs() > 1e-6) {
+        final delta = (y2 - y0) / denom;
+        refinedTau = bestTau + delta;
+      }
+    }
+
+    if (refinedTau <= 0) return (0.0, 0.0);
+
+    final pitchHz = sampleRate / refinedTau;
+    final confidence = highestScore.clamp(0.0, 1.0);
+
+    return (pitchHz, confidence);
+  }
+
+  /// Detects rapid volume/energy attack onsets across audio frames.
+  static Set<int> _detectOnsetFrames(List<double> energies, int totalFrames) {
+    final onsetFrames = <int>{};
+    if (totalFrames < 3) return onsetFrames;
+
+    for (int i = 1; i < totalFrames - 1; i++) {
+      final prev = energies[i - 1];
+      final cur = energies[i];
+      final next = energies[i + 1];
+
+      // Energy rise threshold
+      final delta = cur - prev;
+      if (delta > 0.035 && cur > next && cur > 0.04) {
+        onsetFrames.add(i);
+      }
+    }
+
+    return onsetFrames;
+  }
+
+  /// Strictly enforces monophony, filters spurious micro-glitches (< 35ms),
+  /// scales note timestamps/durations according to [speedMultiplier], and maps to violin fingering.
+  static List<SongNote> _enforceMonophony(
+    List<_DetectedNoteCandidate> candidates, {
     double speedMultiplier = 1.0,
   }) {
-    final songNotes = <SongNote>[];
-    final timeScale = speedMultiplier;
+    // 1. Filter out notes shorter than 35ms (acoustic glissando / bow transit noise)
+    final filtered = candidates.where((n) => (n.endTimeMs - n.startTimeMs) >= 35).toList();
+    if (filtered.isEmpty) return [];
 
+    // 2. Merge contiguous notes of identical pitch separated by <= 25ms micro-gaps
+    final merged = <_DetectedNoteCandidate>[];
+    for (final note in filtered) {
+      if (merged.isEmpty) {
+        merged.add(note);
+      } else {
+        final prev = merged.last;
+        final gapMs = note.startTimeMs - prev.endTimeMs;
+        if (gapMs <= 25 && prev.midiNote == note.midiNote) {
+          prev.endTimeMs = note.endTimeMs;
+          prev.confidence = math.max(prev.confidence, note.confidence);
+        } else {
+          merged.add(note);
+        }
+      }
+    }
+
+    // 3. Strictly enforce non-overlapping time intervals and scale back to original speed
+    final resultNotes = <SongNote>[];
     int lastEndMs = 0;
 
-    for (int i = 0; i < rawNotes.length; i++) {
-      final rn = rawNotes[i];
-      final (vString, finger) = MidiParser.mapMidiToViolin(rn.midiNote);
-      final noteName = MusicTheory.midiToNoteName(rn.midiNote);
+    for (int i = 0; i < merged.length; i++) {
+      final cur = merged[i];
 
-      var startMs = (rn.startTimeSec * 1000 * timeScale).round();
-      var durationMs = (rn.durationSec * 1000 * timeScale).round();
+      var startMs = (cur.startTimeMs * speedMultiplier).round();
+      var durationMs = ((cur.endTimeMs - cur.startTimeMs) * speedMultiplier).round();
 
-      // Ensure strictly monotonic start times: startMs must never be earlier than lastEndMs
       if (startMs < lastEndMs) {
         startMs = lastEndMs;
       }
 
-      // Check next note to STRICTLY prevent overlap ("внахлёст")
-      if (i + 1 < rawNotes.length) {
-        final nextStartMs = (rawNotes[i + 1].startTimeSec * 1000 * timeScale).round();
+      // Note cannot extend past start of the next note
+      if (i + 1 < merged.length) {
+        final nextStartMs = (merged[i + 1].startTimeMs * speedMultiplier).round();
         if (nextStartMs > startMs) {
-          // If note extends into or past next note, CLAMP it!
           if (startMs + durationMs > nextStartMs) {
             durationMs = nextStartMs - startMs;
-          } else {
-            // Gap between notes:
-            final gapMs = nextStartMs - (startMs + durationMs);
-            // Bridge tiny acoustic flutter gaps (<35ms) for legato connection
-            if (gapMs > 0 && gapMs <= 35) {
-              durationMs = nextStartMs - startMs;
-            }
           }
         }
       }
 
+      // Minimum audible note duration: 15ms (1/32 note at high tempo)
       durationMs = math.max(15, durationMs);
       lastEndMs = startMs + durationMs;
 
-      songNotes.add(SongNote(
-        midiNote: rn.midiNote,
+      final (vString, finger) = MidiParser.mapMidiToViolin(cur.midiNote);
+      final noteName = MusicTheory.midiToNoteName(cur.midiNote);
+
+      resultNotes.add(SongNote(
+        midiNote: cur.midiNote,
         startTimeMs: startMs,
         durationMs: durationMs,
         noteName: noteName,
@@ -654,60 +583,76 @@ class AudioTranscriber {
       ));
     }
 
-    return songNotes;
+    return resultNotes;
   }
 
-  /// Estimates dominant key signature from pitch class histogram
-  static String _estimateKeySignature(List<SongNote> notes) {
-    if (notes.isEmpty) return "A Major";
+  /// Estimates BPM by analyzing inter-onset intervals (IOI) of detected notes.
+  static int _estimateBpm(List<SongNote> notes) {
+    if (notes.length < 2) return 100;
 
-    final pcCounts = List<int>.filled(12, 0);
-    for (final n in notes) {
-      pcCounts[n.midiNote % 12]++;
+    final intervals = <int>[];
+    for (int i = 0; i < notes.length - 1; i++) {
+      final ioi = notes[i + 1].startTimeMs - notes[i].startTimeMs;
+      if (ioi >= 100 && ioi <= 2000) {
+        intervals.add(ioi);
+      }
     }
 
-    // Common violin keys: G Major (1#), D Major (2#), A Major (3#), C Major
-    final gMajorScore = pcCounts[7] + pcCounts[9] + pcCounts[11] + pcCounts[0] + pcCounts[2] + pcCounts[4] + pcCounts[6];
-    final dMajorScore = pcCounts[2] + pcCounts[4] + pcCounts[6] + pcCounts[7] + pcCounts[9] + pcCounts[11] + pcCounts[1];
-    final aMajorScore = pcCounts[9] + pcCounts[11] + pcCounts[1] + pcCounts[2] + pcCounts[4] + pcCounts[6] + pcCounts[8];
-    final cMajorScore = pcCounts[0] + pcCounts[2] + pcCounts[4] + pcCounts[5] + pcCounts[7] + pcCounts[9] + pcCounts[11];
+    if (intervals.isEmpty) return 100;
 
-    final maxScore = math.max(math.max(gMajorScore, dMajorScore), math.max(aMajorScore, cMajorScore));
-    if (maxScore == dMajorScore) return "D Major";
-    if (maxScore == aMajorScore) return "A Major";
-    if (maxScore == gMajorScore) return "G Major";
-    return "C Major";
+    intervals.sort();
+    final medianIoi = intervals[intervals.length ~/ 2];
+
+    double beatMs = medianIoi.toDouble();
+    while (beatMs < 300) beatMs *= 2.0; // accelerate sub-beats to quarter note
+    while (beatMs > 900) beatMs /= 2.0;
+
+    final bpm = (60000.0 / beatMs).round().clamp(50, 220);
+    return bpm;
+  }
+
+  /// Estimates musical key from note pitch histogram (Krumhansl-Schmuckler key-finding heuristic).
+  static String _estimateKeySignature(List<SongNote> notes) {
+    if (notes.isEmpty) return "C Major";
+
+    final pitchCounts = List.filled(12, 0);
+    for (final note in notes) {
+      pitchCounts[note.midiNote % 12] += note.durationMs;
+    }
+
+    // Standard major key profile
+    final majorProfile = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
+    const keyNames = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+
+    double maxCorrelation = -1e9;
+    String bestKey = "C Major";
+
+    for (int tonic = 0; tonic < 12; tonic++) {
+      double correlation = 0.0;
+      for (int i = 0; i < 12; i++) {
+        final pc = (tonic + i) % 12;
+        correlation += pitchCounts[pc] * majorProfile[i];
+      }
+      if (correlation > maxCorrelation) {
+        maxCorrelation = correlation;
+        bestKey = "${keyNames[tonic]} Major";
+      }
+    }
+
+    return bestKey;
   }
 }
 
-class PitchFrame {
-  final double timeSec;
-  final double pitchHz;
-  final int midiNote;
-  final double midiFraction;
-  final double energy;
-  final double confidence;
+class _DetectedNoteCandidate {
+  int midiNote;
+  int startTimeMs;
+  int endTimeMs;
+  double confidence;
 
-  const PitchFrame({
-    required this.timeSec,
-    required this.pitchHz,
+  _DetectedNoteCandidate({
     required this.midiNote,
-    this.midiFraction = 0.0,
-    required this.energy,
+    required this.startTimeMs,
+    required this.endTimeMs,
     required this.confidence,
-  });
-}
-
-class RawNoteEvent {
-  final int midiNote;
-  final double startTimeSec;
-  final double durationSec;
-  final double avgEnergy;
-
-  const RawNoteEvent({
-    required this.midiNote,
-    required this.startTimeSec,
-    required this.durationSec,
-    required this.avgEnergy,
   });
 }

@@ -44,3 +44,6 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 *.apk
+
+# Dynamic libraries linked for local CLI testing
+libonnxruntime*.dylib

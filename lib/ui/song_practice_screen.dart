@@ -11,6 +11,7 @@ import '../music_theory.dart';
 import '../services/midi_parser.dart';
 import '../services/omr_parser.dart';
 import '../services/midi_generator.dart';
+import '../services/song_audio_generator.dart';
 import '../theme/apple_violin_theme.dart';
 import 'widgets/musical_staff_view.dart';
 
@@ -202,12 +203,21 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
       if (clampedFromMs >= n.startTimeMs && clampedFromMs < n.startTimeMs + n.durationMs) {
         initialActiveIdx = i;
         _lastNotePlayed = i;
-        final remainingSec = (((n.startTimeMs + n.durationMs - clampedFromMs) / 1000.0) / _playbackSpeed).clamp(0.025, 4.0);
-        final hz = MusicTheory.midiToHz(n.midiNote);
-        widget.audioEngine.playTone(hz, remainingSec);
         break;
       }
     }
+
+    // High-fidelity pre-rendered PCM stream: measure-aligned, authentic harmonics, zero UI jitter
+    final pcmSamples = SongAudioGenerator.generatePcm(
+      _currentSong,
+      sampleRate: 44100,
+      speedMultiplier: _playbackSpeed,
+      startFromMs: clampedFromMs,
+      addHarmonics: true,
+      addVibrato: true,
+      addMeasureDynamics: true,
+    );
+    widget.audioEngine.playPcmBuffer(pcmSamples);
 
     setState(() {
       _isPlaying = false;
@@ -229,15 +239,11 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
       final elapsedMs = _demoStopwatch?.elapsedMilliseconds ?? 0;
       final currentTime = _demoFromMs + (elapsedMs * _playbackSpeed).round();
 
-      // Trigger all notes whose startTimeMs has arrived - impossible to skip!
       while (_nextNoteIndex < _currentSong.notes.length) {
         final note = _currentSong.notes[_nextNoteIndex];
         if (note.startTimeMs <= currentTime) {
           _lastNotePlayed = _nextNoteIndex;
           _currentNoteIndex = _nextNoteIndex;
-          final durSec = ((note.durationMs / 1000.0) / _playbackSpeed).clamp(0.025, 4.0);
-          final hz = MusicTheory.midiToHz(note.midiNote);
-          widget.audioEngine.playTone(hz, durSec);
           _nextNoteIndex++;
         } else {
           break;

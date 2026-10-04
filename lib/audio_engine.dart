@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:ffi';
 import 'dart:io' show File, Platform, Directory;
 import 'dart:isolate';
+import 'dart:typed_data';
+import 'package:ffi/ffi.dart';
 import 'package:flutter/services.dart' show MethodChannel;
 
 /// -------------------------------------------------------------------------
@@ -96,6 +98,9 @@ typedef _PlayToneDart = void Function(
 typedef _StopToneNative = Void Function();
 typedef _StopToneDart = void Function();
 
+typedef _PlayPcmBufferNative = Void Function(Pointer<Float>, Int32);
+typedef _PlayPcmBufferDart = void Function(Pointer<Float>, int);
+
 typedef _IsTonePlayingNative = Int32 Function();
 typedef _IsTonePlayingDart = int Function();
 
@@ -188,6 +193,7 @@ class AudioEngine {
   _PlayToneDart? _playTone;
   _StopToneDart? _stopTone;
   _IsTonePlayingDart? _isTonePlayingNative;
+  _PlayPcmBufferDart? _playPcmBuffer;
   bool _isTonePlayingDart = false;
   Timer? _tonePlayingTimer;
 
@@ -300,6 +306,24 @@ class AudioEngine {
     fn(handle, frequencyHz, durationSec);
   }
 
+  void playPcmBuffer(Float32List samples) {
+    if (samples.isEmpty) return;
+    _isTonePlayingDart = true;
+    _tonePlayingTimer?.cancel();
+    final durSec = samples.length / 44100.0;
+    _tonePlayingTimer = Timer(Duration(milliseconds: (durSec * 1000).toInt() + 100), () {
+      _isTonePlayingDart = false;
+    });
+
+    final fn = _playPcmBuffer;
+    if (fn != null) {
+      final ptr = calloc<Float>(samples.length);
+      ptr.asTypedList(samples.length).setAll(0, samples);
+      fn(ptr, samples.length);
+      calloc.free(ptr);
+    }
+  }
+
   void playTone(double frequencyHz, [double durationSec = 1.0]) {
     _isTonePlayingDart = true;
     _tonePlayingTimer?.cancel();
@@ -408,6 +432,9 @@ class AudioEngine {
     } catch (_) {}
     try {
       _stopTone = library.lookupFunction<_StopToneNative, _StopToneDart>('violin_stop_tone');
+    } catch (_) {}
+    try {
+      _playPcmBuffer = library.lookupFunction<_PlayPcmBufferNative, _PlayPcmBufferDart>('violin_play_pcm_buffer');
     } catch (_) {}
     try {
       _isTonePlayingNative = library.lookupFunction<_IsTonePlayingNative, _IsTonePlayingDart>('violin_is_tone_playing');

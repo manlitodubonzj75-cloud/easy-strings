@@ -63,23 +63,41 @@ void violin_processor_stop(void* handle)
 }
 
 /**
- * Return current state of worker.
+ * Callback attachment. Safe to update during operation.
  */
 VIOLIN_EXPORT
-int violin_processor_is_running(void* handle)
+void violin_processor_set_callback(
+    void* handle,
+    PitchCallback callback)
 {
     if (handle == nullptr) {
-        return 0;
+        return;
     }
 
     auto* processor =
         static_cast<ViolinTracker*>(handle);
 
-    return processor->isRunning() ? 1 : 0;
+    processor->setCallback(callback);
 }
 
 /**
- * Platform hardware microphone control.
+ * Query current pitch synchronously without receiving stream events.
+ */
+VIOLIN_EXPORT
+float violin_processor_get_pitch(void* handle)
+{
+    if (handle == nullptr) {
+        return 0.0f;
+    }
+
+    auto* processor =
+        static_cast<ViolinTracker*>(handle);
+
+    return processor->getStablePitch();
+}
+
+/**
+ * Platform mic capture control.
  */
 VIOLIN_EXPORT
 int violin_processor_start_mic(void* handle)
@@ -133,6 +151,14 @@ VIOLIN_EXPORT
 void violin_play_tone_legato(float frequency_hz, float duration_sec, int is_legato)
 {
     violin::playAudioTone(frequency_hz, duration_sec, is_legato != 0);
+}
+
+VIOLIN_EXPORT
+void violin_play_pcm_buffer(const float* samples, int count)
+{
+    if (samples != nullptr && count > 0) {
+        violin::playAudioPcmBuffer(samples, static_cast<std::size_t>(count));
+    }
 }
 
 VIOLIN_EXPORT
@@ -218,35 +244,7 @@ std::size_t violin_processor_push_samples(
     auto* processor =
         static_cast<ViolinTracker*>(handle);
 
-    return processor->pushSamples(
-        samples,
-        count);
-}
-
-/**
- * Register / unregister callback.
- */
-VIOLIN_EXPORT
-void violin_processor_set_callback(
-    void* handle,
-    PitchCallback callback)
-{
-    if (handle == nullptr) {
-        return;
-    }
-
-    auto* processor =
-        static_cast<ViolinTracker*>(handle);
-
-    processor->setCallback(callback);
-}
-
-VIOLIN_EXPORT
-std::size_t violin_processor_buffered_samples(
-    void* handle)
-{
-    (void)handle;
-    return 0;
+    return processor->pushSamples(samples, count);
 }
 
 } // extern "C"

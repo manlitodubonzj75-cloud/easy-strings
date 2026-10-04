@@ -117,6 +117,7 @@ private:
 };
 
 void playAudioTone(float freq_hz, float duration_sec, bool is_legato = false) noexcept;
+void playAudioPcmBuffer(const float* samples, std::size_t count) noexcept;
 bool isAudioTonePlaying() noexcept;
 void stopAudioTone() noexcept;
 } // namespace violin

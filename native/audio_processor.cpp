@@ -10,6 +10,7 @@
 #include <limits>
 #include <thread>
 #include <vector>
+#include <mutex>
 
 namespace violin {
 
@@ -110,7 +111,30 @@ public:
         pending_stop_.store(true, std::memory_order_release);
         NoteEvent discard;
         while (note_queue_.pull(discard)) {}
+        {
+            std::lock_guard<std::mutex> lock(pcm_mutex_);
+            pcm_stream_.clear();
+            pcm_read_pos_ = 0;
+        }
         is_playing_.store(false, std::memory_order_release);
+    }
+
+    void playPcm(const float* samples, std::size_t count) {
+        if (!samples || count == 0) {
+            stop();
+            return;
+        }
+        stop();
+        {
+            std::lock_guard<std::mutex> lock(pcm_mutex_);
+            pcm_stream_.assign(samples, samples + count);
+            pcm_read_pos_ = 0;
+        }
+        pending_stop_.store(false, std::memory_order_release);
+        is_playing_.store(true, std::memory_order_release);
+        if (queue_) {
+            AudioQueueStart(queue_, nullptr);
+        }
     }
 
     void play(float freq_hz, float duration_sec, bool is_legato = false) {
@@ -138,6 +162,11 @@ public:
 
         if (pending_stop_.load(std::memory_order_acquire)) {
             synth_.noteOff();
+            {
+                std::lock_guard<std::mutex> lock(pcm_mutex_);
+                pcm_stream_.clear();
+                pcm_read_pos_ = 0;
+            }
             is_playing_.store(false, std::memory_order_release);
             std::memset(out, 0, buffer->mAudioDataBytesCapacity);
             buffer->mAudioDataByteSize = buffer->mAudioDataBytesCapacity;
@@ -150,6 +179,29 @@ public:
             buffer->mAudioDataByteSize = buffer->mAudioDataBytesCapacity;
             if (queue_) AudioQueueEnqueueBuffer(queue_, buffer, 0, nullptr);
             return;
+        }
+
+        // Direct PCM stream playback
+        {
+            std::lock_guard<std::mutex> lock(pcm_mutex_);
+            if (!pcm_stream_.empty() && pcm_read_pos_ < pcm_stream_.size()) {
+                const std::size_t remaining = pcm_stream_.size() - pcm_read_pos_;
+                const std::size_t to_copy = std::min(static_cast<std::size_t>(count), remaining);
+                std::memcpy(out, pcm_stream_.data() + pcm_read_pos_, to_copy * sizeof(float));
+                pcm_read_pos_ += to_copy;
+
+                if (to_copy < count) {
+                    std::memset(out + to_copy, 0, (count - to_copy) * sizeof(float));
+                    pcm_stream_.clear();
+                    pcm_read_pos_ = 0;
+                    is_playing_.store(false, std::memory_order_release);
+                } else {
+                    is_playing_.store(true, std::memory_order_release);
+                }
+                buffer->mAudioDataByteSize = buffer->mAudioDataBytesCapacity;
+                if (queue_) AudioQueueEnqueueBuffer(queue_, buffer, 0, nullptr);
+                return;
+            }
         }
 
         UInt32 generated = 0;
@@ -194,6 +246,9 @@ private:
     std::atomic<bool> is_playing_{false};
     std::atomic<bool> pending_stop_{false};
     BowedViolinModel synth_{44100.0f};
+    std::mutex pcm_mutex_;
+    std::vector<float> pcm_stream_;
+    std::size_t pcm_read_pos_{0};
 };
 
 bool isAudioTonePlaying() noexcept {
@@ -206,6 +261,10 @@ void playAudioTone(float freq_hz, float duration_sec, bool is_legato) noexcept {
 
 void stopAudioTone() noexcept {
     AppleAudioPlayer::instance().stop();
+}
+
+void playAudioPcmBuffer(const float* samples, std::size_t count) noexcept {
+    AppleAudioPlayer::instance().playPcm(samples, count);
 }
 
 #elif defined(__ANDROID__)
