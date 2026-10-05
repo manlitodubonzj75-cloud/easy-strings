@@ -28,14 +28,57 @@ class _AudioTranscribeSheetState extends State<AudioTranscribeSheet> {
   double _progress = 0.0;
   String _statusMessage = "";
   String? _errorMessage;
+  int _activeRequestId = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _urlController.addListener(_onUrlChanged);
+  }
+
+  void _onUrlChanged() {
+    if (_errorMessage != null && mounted) {
+      setState(() {
+        _errorMessage = null;
+      });
+    }
+  }
 
   @override
   void dispose() {
+    _activeRequestId++; // Invalidate any running background async tasks
+    _urlController.removeListener(_onUrlChanged);
     _urlController.dispose();
     super.dispose();
   }
 
+  String _cleanError(dynamic error) {
+    var msg = error.toString();
+    msg = msg.replaceAll(RegExp(r"^(Exception|FormatException|HttpException|FileSystemException):\s*"), "");
+    msg = msg.replaceAll(RegExp(r"^(Exception|FormatException|HttpException|FileSystemException):\s*"), "");
+    if (msg.contains("CORS") || msg.contains("XMLHttpRequest")) {
+      return "В веб-версии YouTube блокирует прямое скачивание (CORS). Для тестов в браузере используйте MP3/WAV файл через кнопку «Локальный файл», либо запустите приложение на macOS/Android.";
+    }
+    if (msg.contains("не найдена в системе") && msg.contains("yt-dlp")) {
+      return "Ошибка скачивания по ссылке. Проверьте правильность URL или используйте локальный аудиофайл.";
+    }
+    return msg;
+  }
+
+  void _cancelActiveOperation() {
+    _activeRequestId++;
+    if (mounted) {
+      setState(() {
+        _isProcessing = false;
+        _progress = 0.0;
+        _statusMessage = "";
+        _errorMessage = "Загрузка отменена пользователем.";
+      });
+    }
+  }
+
   Future<void> _pickAudioFile() async {
+    final reqId = ++_activeRequestId;
     setState(() {
       _errorMessage = null;
     });
@@ -47,18 +90,23 @@ class _AudioTranscribeSheetState extends State<AudioTranscribeSheet> {
         allowedExtensions: ["wav", "mp3", "m4a", "aac", "flac", "ogg"],
       );
 
+      if (!mounted || reqId != _activeRequestId) return;
       if (result.isEmpty) return;
 
       final file = result.first;
       final bytes = await file.readAsBytes();
       final title = file.name.replaceAll(RegExp(r"\.[a-zA-Z0-9]+$"), "");
 
-      await _runTranscription(bytes, title);
+      if (!mounted || reqId != _activeRequestId) return;
+      await _runTranscription(bytes, title, reqId: reqId);
     } catch (e) {
-      setState(() {
-        _isProcessing = false;
-        _errorMessage = "Ошибка выбора файла: $e";
-      });
+      if (mounted && reqId == _activeRequestId) {
+        setState(() {
+          _isProcessing = false;
+          _progress = 0.0;
+          _errorMessage = "Ошибка выбора файла: ${_cleanError(e)}";
+        });
+      }
     }
   }
 
@@ -71,10 +119,12 @@ class _AudioTranscribeSheetState extends State<AudioTranscribeSheet> {
       return;
     }
 
+    final reqId = ++_activeRequestId;
+
     setState(() {
       _isProcessing = true;
       _progress = 0.05;
-      _statusMessage = "Подключение к источнику через yt-dlp...";
+      _statusMessage = "Подключение к источнику аудио...";
       _errorMessage = null;
     });
 
@@ -82,7 +132,7 @@ class _AudioTranscribeSheetState extends State<AudioTranscribeSheet> {
       final downloaded = await UrlAudioDownloader.downloadFromUrl(
         url,
         onProgress: (status, p) {
-          if (mounted) {
+          if (mounted && reqId == _activeRequestId) {
             setState(() {
               _statusMessage = status;
               _progress = p;
@@ -91,16 +141,33 @@ class _AudioTranscribeSheetState extends State<AudioTranscribeSheet> {
         },
       );
 
-      await _runTranscription(downloaded.bytes, downloaded.title, startProgress: 0.52);
+      if (!mounted || reqId != _activeRequestId) return;
+
+      await _runTranscription(
+        downloaded.bytes,
+        downloaded.title,
+        startProgress: 0.52,
+        reqId: reqId,
+      );
     } catch (e) {
-      setState(() {
-        _isProcessing = false;
-        _errorMessage = "Ошибка загрузки по ссылке: $e";
-      });
+      if (mounted && reqId == _activeRequestId) {
+        setState(() {
+          _isProcessing = false;
+          _progress = 0.0;
+          _errorMessage = "Ошибка загрузки по ссылке: ${_cleanError(e)}";
+        });
+      }
     }
   }
 
-  Future<void> _runTranscription(Uint8List bytes, String title, {double startProgress = 0.05}) async {
+  Future<void> _runTranscription(
+    Uint8List bytes,
+    String title, {
+    double startProgress = 0.05,
+    required int reqId,
+  }) async {
+    if (!mounted || reqId != _activeRequestId) return;
+
     setState(() {
       _isProcessing = true;
       _progress = startProgress;
@@ -113,7 +180,7 @@ class _AudioTranscribeSheetState extends State<AudioTranscribeSheet> {
         bytes,
         title: title.isEmpty ? "Транскрибированное аудио" : title,
         onProgress: (p, status) {
-          if (mounted) {
+          if (mounted && reqId == _activeRequestId) {
             setState(() {
               _progress = startProgress + (p * (1.0 - startProgress));
               _statusMessage = status;
@@ -122,14 +189,23 @@ class _AudioTranscribeSheetState extends State<AudioTranscribeSheet> {
         },
       );
 
-      if (mounted) {
-        widget.onSongTranscribed(res.song, res.report);
-      }
-    } catch (e) {
+      if (!mounted || reqId != _activeRequestId) return;
+
       setState(() {
         _isProcessing = false;
-        _errorMessage = "Ошибка транскрибации: $e";
+        _progress = 1.0;
       });
+
+      widget.onSongTranscribed(res.song, res.report);
+      widget.onClose(); // Automatically dismiss sheet on success
+    } catch (e) {
+      if (mounted && reqId == _activeRequestId) {
+        setState(() {
+          _isProcessing = false;
+          _progress = 0.0;
+          _errorMessage = "Ошибка транскрибации: ${_cleanError(e)}";
+        });
+      }
     }
   }
 
@@ -201,15 +277,35 @@ class _AudioTranscribeSheetState extends State<AudioTranscribeSheet> {
               if (_errorMessage != null)
                 Container(
                   margin: const EdgeInsets.only(bottom: 16),
-                  padding: const EdgeInsets.all(12),
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
                   decoration: BoxDecoration(
                     color: AppleViolinTheme.appleRed.withValues(alpha: 0.15),
                     borderRadius: BorderRadius.circular(12),
                     border: Border.all(color: AppleViolinTheme.appleRed.withValues(alpha: 0.3)),
                   ),
-                  child: Text(
-                    _errorMessage!,
-                    style: const TextStyle(color: AppleViolinTheme.appleRed, fontSize: 13),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Icon(Icons.error_outline_rounded, color: AppleViolinTheme.appleRed, size: 20),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          _errorMessage!,
+                          style: const TextStyle(color: AppleViolinTheme.appleRed, fontSize: 13, height: 1.3),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      GestureDetector(
+                        onTap: () {
+                          if (mounted) {
+                            setState(() {
+                              _errorMessage = null;
+                            });
+                          }
+                        },
+                        child: const Icon(Icons.close_rounded, color: AppleViolinTheme.appleRed, size: 18),
+                      ),
+                    ],
                   ),
                 ),
 
@@ -277,12 +373,21 @@ class _AudioTranscribeSheetState extends State<AudioTranscribeSheet> {
                       const SizedBox(height: 6),
                       Text(
                         _progress < 0.52
-                            ? "Скачивание медиапотока на высокой скорости без ограничений..."
-                            : "Выделение полифонических мелодических контуров и расчет аппликатуры...",
+                            ? "Скачивание медиапотока на высокой скорости..."
+                            : "Выделение полифонических мелодических контуров и расчёт аппликатуры...",
                         textAlign: TextAlign.center,
                         style: TextStyle(
                           color: Colors.white.withValues(alpha: 0.5),
                           fontSize: 11,
+                        ),
+                      ),
+                      const SizedBox(height: 14),
+                      TextButton.icon(
+                        onPressed: _cancelActiveOperation,
+                        icon: const Icon(Icons.cancel_outlined, size: 16, color: Colors.white60),
+                        label: const Text(
+                          "Отменить загрузку",
+                          style: TextStyle(color: Colors.white60, fontSize: 12),
                         ),
                       ),
                     ],
@@ -407,7 +512,6 @@ class _AudioTranscribeSheetState extends State<AudioTranscribeSheet> {
                   const SizedBox(height: 12),
                   TextField(
                     controller: _urlController,
-                    autofocus: true,
                     style: const TextStyle(color: Colors.white, fontSize: 13),
                     decoration: InputDecoration(
                       hintText: "https://www.youtube.com/watch?v=...",
@@ -425,7 +529,14 @@ class _AudioTranscribeSheetState extends State<AudioTranscribeSheet> {
                       ),
                       suffixIcon: IconButton(
                         icon: const Icon(Icons.clear_rounded, size: 18, color: Colors.white38),
-                        onPressed: () => _urlController.clear(),
+                        onPressed: () {
+                          _urlController.clear();
+                          if (_errorMessage != null) {
+                            setState(() {
+                              _errorMessage = null;
+                            });
+                          }
+                        },
                       ),
                     ),
                   ),
@@ -520,7 +631,7 @@ class _AudioTranscribeSheetState extends State<AudioTranscribeSheet> {
                   ],
                 ),
               ),
-              const Icon(Icons.arrow_forward_ios_rounded, color: Colors.white24, size: 14),
+              const Icon(Icons.chevron_right_rounded, color: Colors.white38),
             ],
           ),
         ),

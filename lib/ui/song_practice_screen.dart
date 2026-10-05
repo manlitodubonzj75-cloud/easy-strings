@@ -697,7 +697,7 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
                 backgroundColor: AppleViolinTheme.appleGreen,
-                content: Text('✓ '),
+                content: Text('✓ "${song.title}" успешно загружено (${song.notes.length} нот)'),
                 duration: const Duration(seconds: 4),
               ),
             );

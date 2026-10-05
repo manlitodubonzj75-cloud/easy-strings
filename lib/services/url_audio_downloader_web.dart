@@ -1,4 +1,5 @@
 import "dart:async";
+import "dart:convert";
 import "dart:typed_data";
 import "package:http/http.dart" as http;
 import "package:youtube_explode_dart/youtube_explode_dart.dart" as yte;
@@ -75,40 +76,103 @@ class UrlAudioDownloader {
     String url, {
     void Function(String status, double progress)? onProgress,
   }) async {
-    final yt = yte.YoutubeExplode();
-    try {
-      onProgress?.call("Получение метаданных YouTube...", 0.1);
-      final video = await yt.videos.get(url);
-      final title = video.title;
+    final vId = extractVideoId(url);
+    final client = http.Client();
 
-      onProgress?.call("Поиск аудиопотока...", 0.3);
-      final manifest = await yt.videos.streamsClient.getManifest(video.id);
-      final audioStreamInfo = manifest.audioOnly.withHighestBitrate();
+    // 1. Try public Invidious API through CORS proxies
+    final invidiousInstances = [
+      "https://inv.nadeko.net",
+      "https://invidious.nerdvpn.de",
+      "https://vid.puffyan.us",
+      "https://inv.tux.pizza",
+    ];
 
-      onProgress?.call("Загрузка аудиопотока...", 0.4);
-      final stream = yt.videos.streamsClient.get(audioStreamInfo);
+    for (final host in invidiousInstances) {
+      try {
+        onProgress?.call("Подключение к аудиопотоку (Web Mirror)...", 0.15);
+        final apiUrl = "$host/api/v1/videos/$vId";
+        final proxyUrl = "https://api.allorigins.win/raw?url=${Uri.encodeComponent(apiUrl)}";
+        final resp = await client.get(Uri.parse(proxyUrl)).timeout(const Duration(seconds: 8));
 
-      final bytesBuilder = BytesBuilder();
-      int downloaded = 0;
-      final total = audioStreamInfo.size.totalBytes;
+        if (resp.statusCode == 200) {
+          final data = jsonDecode(resp.body) as Map<String, dynamic>;
+          final title = data["title"] as String? ?? "YouTube Audio";
+          final formatStreams = data["adaptiveFormats"] as List?;
 
-      await for (final chunk in stream) {
-        bytesBuilder.add(chunk);
-        downloaded += chunk.length;
-        if (total > 0) {
-          final progress = 0.4 + (downloaded / total) * 0.55;
-          onProgress?.call("Загрузка: ${(downloaded / 1024 / 1024).toStringAsFixed(1)} MB...", progress.clamp(0.4, 0.95));
+          if (formatStreams != null && formatStreams.isNotEmpty) {
+            final audioStreams = formatStreams.where((f) {
+              final type = f["type"] as String? ?? "";
+              return type.startsWith("audio/");
+            }).toList();
+
+            if (audioStreams.isNotEmpty) {
+              final target = audioStreams.first;
+              final streamUrl = target["url"] as String?;
+              if (streamUrl != null && streamUrl.isNotEmpty) {
+                onProgress?.call("Загрузка аудиопотока...", 0.35);
+                final audioProxy = "https://api.allorigins.win/raw?url=${Uri.encodeComponent(streamUrl)}";
+                final audioRes = await client.get(Uri.parse(audioProxy)).timeout(const Duration(seconds: 40));
+                if (audioRes.statusCode == 200 && audioRes.bodyBytes.isNotEmpty) {
+                  onProgress?.call("Аудио получено!", 1.0);
+                  return DownloadedAudioResult(
+                    bytes: audioRes.bodyBytes,
+                    title: title,
+                    sourceUrl: url,
+                  );
+                }
+              }
+            }
+          }
         }
+      } catch (_) {
+        // Continue to next mirror
       }
+    }
 
-      onProgress?.call("Загрузка завершена!", 1.0);
-      return DownloadedAudioResult(
-        bytes: bytesBuilder.takeBytes(),
-        title: title,
-        sourceUrl: url,
+    // 2. Fallback: Direct YoutubeExplode (will work if hosted behind proxy or in Electron/Tauri)
+    try {
+      final yt = yte.YoutubeExplode();
+      try {
+        onProgress?.call("Получение метаданных YouTube...", 0.2);
+        final video = await yt.videos.get(url).timeout(const Duration(seconds: 8));
+        final title = video.title;
+
+        onProgress?.call("Поиск аудиопотока...", 0.35);
+        final manifest = await yt.videos.streamsClient.getManifest(video.id).timeout(const Duration(seconds: 8));
+        final audioStreamInfo = manifest.audioOnly.withHighestBitrate();
+
+        onProgress?.call("Загрузка аудиопотока...", 0.5);
+        final stream = yt.videos.streamsClient.get(audioStreamInfo);
+
+        final bytesBuilder = BytesBuilder();
+        int downloaded = 0;
+        final total = audioStreamInfo.size.totalBytes;
+
+        await for (final chunk in stream.timeout(const Duration(seconds: 15))) {
+          bytesBuilder.add(chunk);
+          downloaded += chunk.length;
+          if (total > 0) {
+            final progress = 0.5 + (downloaded / total) * 0.48;
+            onProgress?.call("Загрузка: ${(downloaded / 1024 / 1024).toStringAsFixed(1)} MB...", progress.clamp(0.5, 0.98));
+          }
+        }
+
+        onProgress?.call("Загрузка завершена!", 1.0);
+        return DownloadedAudioResult(
+          bytes: bytesBuilder.takeBytes(),
+          title: title,
+          sourceUrl: url,
+        );
+      } finally {
+        yt.close();
+      }
+    } catch (e) {
+      throw FormatException(
+        "В веб-браузере YouTube блокирует скачивание политикой CORS.\n"
+        "Для работы в Web используйте кнопку «Локальный файл» (MP3/WAV/AAC) или запустите нативное приложение macOS / Android.",
       );
     } finally {
-      yt.close();
+      client.close();
     }
   }
 
@@ -118,20 +182,43 @@ class UrlAudioDownloader {
   }) async {
     onProgress?.call("Запрос к серверу...", 0.1);
     final uri = Uri.parse(url);
-    final response = await http.get(uri);
 
-    if (response.statusCode != 200) {
-      throw HttpException("Ошибка скачивания: HTTP ${response.statusCode}");
-    }
-
-    onProgress?.call("Загрузка завершена!", 1.0);
+    Uint8List? bodyBytes;
     var title = uri.pathSegments.isNotEmpty ? uri.pathSegments.last : "Аудиозапись";
     if (title.contains(".")) {
       title = title.substring(0, title.lastIndexOf("."));
     }
 
+    // Try direct fetch first
+    try {
+      final response = await http.get(uri).timeout(const Duration(seconds: 15));
+      if (response.statusCode == 200) {
+        bodyBytes = response.bodyBytes;
+      }
+    } catch (_) {
+      // CORS block, try proxy
+    }
+
+    // If direct failed (CORS), fetch through CORS proxy
+    if (bodyBytes == null || bodyBytes.isEmpty) {
+      try {
+        final proxyUri = Uri.parse("https://api.allorigins.win/raw?url=${Uri.encodeComponent(url)}");
+        final resp = await http.get(proxyUri).timeout(const Duration(seconds: 30));
+        if (resp.statusCode == 200) {
+          bodyBytes = resp.bodyBytes;
+        }
+      } catch (_) {}
+    }
+
+    if (bodyBytes == null || bodyBytes.isEmpty) {
+      throw const HttpException(
+        "Не удалось загрузить аудиофайл по ссылке. Сервер источника недоступен или заблокирован браузером (CORS).",
+      );
+    }
+
+    onProgress?.call("Загрузка завершена!", 1.0);
     return DownloadedAudioResult(
-      bytes: response.bodyBytes,
+      bytes: bodyBytes,
       title: title,
       sourceUrl: url,
     );

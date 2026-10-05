@@ -161,6 +161,12 @@ class UrlAudioDownloader {
       }
 
       final playerJson = jsonDecode(playerRes.body) as Map<String, dynamic>;
+      final playabilityStatus = playerJson["playabilityStatus"] as Map<String, dynamic>?;
+      if (playabilityStatus != null && playabilityStatus["status"] != "OK") {
+        final reason = playabilityStatus["reason"] ?? playabilityStatus["status"];
+        throw FormatException("Видео недоступно: $reason");
+      }
+
       final apiTitle = playerJson["videoDetails"]?["title"] as String?;
       if (apiTitle != null && apiTitle.isNotEmpty) {
         title = apiTitle;
@@ -308,6 +314,7 @@ class UrlAudioDownloader {
       "/opt/homebrew/bin/yt-dlp",
       "/usr/local/bin/yt-dlp",
       "/usr/bin/yt-dlp",
+      "${Platform.environment['HOME']}/.local/bin/yt-dlp",
       "yt-dlp",
     ];
 
@@ -336,6 +343,7 @@ class UrlAudioDownloader {
       "/usr/local/bin/ffmpeg",
       "/opt/homebrew/bin/ffmpeg",
       "/usr/bin/ffmpeg",
+      "${Platform.environment['HOME']}/.local/bin/ffmpeg",
       "ffmpeg",
     ];
 
@@ -378,11 +386,14 @@ class UrlAudioDownloader {
     }
 
     // 2. Desktop yt-dlp first (fastest, cleanest 22050Hz WAV output, full duration)
+    Object? ytDlpError;
     final ytDlp = findYtDlpBinary();
     if (ytDlp != null) {
       try {
         return await _downloadViaYtDlp(ytDlp, cleanUrl, onProgress: onProgress);
-      } catch (_) {}
+      } catch (e) {
+        ytDlpError = e;
+      }
     }
 
     // 3. YouTube: High-speed VisionOS HLS pure-Dart engine (bypasses rate-limiting, 403, and SABR)
@@ -395,7 +406,8 @@ class UrlAudioDownloader {
           final vId = extractVideoId(cleanUrl);
           return await downloadWithYoutubeExplode(vId, onProgress: onProgress);
         } catch (_) {}
-        throw Exception("Не удалось загрузить видео с YouTube: $e");
+        final detail = ytDlpError ?? e;
+        throw FormatException("Не удалось загрузить аудио с YouTube: $detail");
       }
     }
 
@@ -404,6 +416,10 @@ class UrlAudioDownloader {
       throw const FormatException(
         "На мобильных устройствах поддерживаются прямые ссылки на YouTube (видео / Shorts / Music) и аудиофайлы (.mp3, .wav, .m4a).",
       );
+    }
+
+    if (ytDlpError != null) {
+      throw FormatException("Ошибка загрузки аудио по ссылке: $ytDlpError");
     }
 
     throw const FileSystemException(
@@ -416,11 +432,14 @@ class UrlAudioDownloader {
     String cleanUrl, {
     void Function(String status, double progress)? onProgress,
   }) async {
-    onProgress?.call("Получение информации о треке через yt-dlp...", 0.10);
+    onProgress?.call("Подключение через yt-dlp...", 0.10);
 
     String title = "Аудио из сети";
     try {
-      final titleResult = await Process.run(ytDlp, ["--no-playlist", "--print", "%(title)s", cleanUrl]);
+      final titleResult = await Process.run(
+        ytDlp,
+        ["--no-playlist", "--socket-timeout", "10", "--retries", "2", "--print", "%(title)s", cleanUrl],
+      ).timeout(const Duration(seconds: 15));
       if (titleResult.exitCode == 0) {
         final rawTitle = titleResult.stdout.toString().trim();
         if (rawTitle.isNotEmpty) {
@@ -439,6 +458,8 @@ class UrlAudioDownloader {
     final ffmpeg = findFfmpegBinary();
     final args = <String>[
       "--no-playlist",
+      "--socket-timeout", "15",
+      "--retries", "2",
       "-x",
       "--audio-format", "wav",
       "--audio-quality", "0",
@@ -452,10 +473,14 @@ class UrlAudioDownloader {
 
     args.add(cleanUrl);
 
-    final processResult = await Process.run(ytDlp, args);
+    final processResult = await Process.run(ytDlp, args).timeout(
+      const Duration(seconds: 60),
+      onTimeout: () => throw TimeoutException("Таймаут загрузки yt-dlp (60 сек)"),
+    );
+
     if (processResult.exitCode != 0) {
       final err = processResult.stderr.toString().trim();
-      throw Exception("Ошибка yt-dlp: ${err.isNotEmpty ? err : processResult.stdout.toString()}");
+      throw Exception(err.isNotEmpty ? err : processResult.stdout.toString().trim());
     }
 
     final wavFile = File(targetWav);
@@ -487,7 +512,7 @@ class UrlAudioDownloader {
     final client = http.Client();
     try {
       final uri = Uri.parse(normalizeUrl(url));
-      final resp = await client.get(uri);
+      final resp = await client.get(uri).timeout(const Duration(seconds: 30));
       if (resp.statusCode != 200) {
         throw HttpException("HTTP ${resp.statusCode}: не удалось загрузить файл");
       }
