@@ -1,6 +1,6 @@
 import 'dart:math' as math;
 import 'dart:async';
-import 'dart:io' show Platform;
+import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform, TargetPlatform;
 import 'package:flutter/material.dart';
 import 'audio_engine.dart';
 import 'music_theory.dart';
@@ -86,7 +86,7 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
       final stream = await _audioEngine.start();
       _pitchSub = stream.listen(_onPitchResult);
 
-      if (Platform.isAndroid) {
+      if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
         await AudioEngine.ensureRecordAudioPermission();
       }
 
@@ -158,7 +158,7 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
 
   void _toggleMic(bool enable) async {
     if (enable) {
-      if (Platform.isAndroid) {
+      if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
         final hasPermission = await AudioEngine.ensureRecordAudioPermission();
         if (!hasPermission) {
           if (mounted) {
